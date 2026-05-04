@@ -1,6 +1,7 @@
 # glasswing-api-deploy
 
 API en Express.js con autenticación SSO de Google y CRUD para las tablas del esquema MySQL.
+API base en Express.js con autenticación SSO de Google (sin persistencia en base de datos por ahora).
 
 ## Requisitos
 
@@ -17,6 +18,7 @@ cp .env.example .env
 ```
 
 2. Configura OAuth de Google:
+2. Completa:
 
 - `GOOGLE_CLIENT_ID`
 - `GOOGLE_CLIENT_SECRET`
@@ -90,3 +92,14 @@ curl -X POST http://localhost:3000/api/roles \
 ## Nota
 
 El CRUD es genérico por tabla y usa el campo `id` como primary key para rutas `/:id`, alineado con tu script SQL.
+## Endpoints
+
+- `GET /health` -> estado del servicio
+- `GET /auth/google` -> inicia OAuth con Google
+- `GET /auth/google/callback` -> callback OAuth
+- `GET /auth/me` -> obtiene usuario autenticado en sesión
+- `GET /auth/logout` -> cierra sesión
+
+## Nota sobre MySQL
+
+No se guarda información todavía. El flujo actual deja listo el login y la sesión en memoria para después conectar MySQL y persistir usuarios/roles cuando se requiera.
