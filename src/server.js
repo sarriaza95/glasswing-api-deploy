@@ -3,6 +3,7 @@ require('dotenv').config();
 const express = require('express');
 const session = require('express-session');
 const passport = require('./config/passport');
+const crudRouter = require('./routes/crud');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -81,6 +82,23 @@ app.get('/auth/logout', (req, res, next) => {
 
 app.get('/auth/failure', (_req, res) => {
   res.status(401).json({ message: 'Error autenticando con Google' });
+});
+
+app.use('/api', crudRouter);
+
+app.use((err, _req, res, _next) => {
+  // eslint-disable-next-line no-console
+  console.error(err);
+
+  if (err && err.code) {
+    return res.status(400).json({
+      message: 'Error de base de datos',
+      code: err.code,
+      detail: err.sqlMessage || err.message,
+    });
+  }
+
+  return res.status(500).json({ message: 'Error interno del servidor' });
 });
 
 app.listen(port, () => {
