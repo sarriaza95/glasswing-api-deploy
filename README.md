@@ -34,8 +34,9 @@ cp .env.example .env
 4. Configura asignación automática con Google:
 
 - `DEFAULT_VOLUNTEER_ROLE_NAME` (por defecto `Volunteer`)
-- Habilita Google People API en Google Cloud para el mismo proyecto OAuth.
-- El login solicita el scope `https://www.googleapis.com/auth/user.addresses.read` para leer país desde Google.
+- `GOOGLE_PEOPLE_API_ENABLED=false` por defecto para evitar el bloqueo de Google por app no verificada.
+- Con `false`, el país se toma del `locale` devuelto por el perfil OAuth de Google, por ejemplo `es-NI`.
+- Solo cambia `GOOGLE_PEOPLE_API_ENABLED=true` cuando la app esté verificada o cuando uses usuarios de prueba autorizados en Google Cloud, porque solicita el scope sensible `https://www.googleapis.com/auth/user.addresses.read`.
 
 ## Instalación y ejecución
 
@@ -72,6 +73,7 @@ PORT=3000
 CLIENT_URL=http://localhost:5173
 API_BASE_URL=http://localhost:3000
 GOOGLE_CALLBACK_URL=http://localhost:3000/api/auth/google/callback
+GOOGLE_PEOPLE_API_ENABLED=false
 FRONTEND_SUCCESS_URL=http://localhost:5173/auth/success
 ```
 
@@ -93,14 +95,14 @@ Si Google muestra `Error 400: redirect_uri_mismatch`, revisa que el valor `callb
 
 Después de un login exitoso con Google, la API guarda o actualiza al usuario en la tabla `users`. Durante ese proceso:
 
-- Lee el país desde la información de Google usando el locale del perfil OAuth o Google People API.
+- Lee el país desde la información de Google usando el `locale` del perfil OAuth. Si `GOOGLE_PEOPLE_API_ENABLED=true`, también puede consultar Google People API.
 - Busca o crea el rol configurado en `DEFAULT_VOLUNTEER_ROLE_NAME`.
 - Busca o crea el país devuelto por Google, por ejemplo `NI` / `Nicaragua`.
 - Asigna al usuario el rol de voluntario y el país devuelto por Google, sin valores de país por defecto.
 - Actualiza `last_login_at`.
 - Escribe en consola `Google SSO user assigned` con el usuario, rol y país finalmente asignados.
 
-Si Google no devuelve país o código ISO de país, el login falla porque `users.country_id` es obligatorio y no se asigna ningún país por defecto.
+Si Google no devuelve país o código ISO de país, el login falla porque `users.country_id` es obligatorio y no se asigna ningún país por defecto. Si activas Google People API mientras la pantalla OAuth sigue en modo Testing, agrega el correo que prueba el login en Google Cloud > OAuth consent screen > Test users; si no, Google puede mostrar `Error 403: access_denied` por app no verificada.
 
 ## Endpoints CRUD (todas las tablas)
 

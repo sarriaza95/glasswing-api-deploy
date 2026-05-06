@@ -9,7 +9,8 @@ router.get('/google/config', (_req, res) => {
     loginUrl: `${env.apiBaseUrl}/api/auth/google`,
     callbackUrl: env.googleCallbackUrl,
     googleCloudAuthorizedRedirectUri: env.googleCallbackUrl,
-    googleCountryScopes: ['profile', 'email', 'https://www.googleapis.com/auth/user.addresses.read'],
+    googleOAuthScopes: env.googleOAuthScopes,
+    googlePeopleApiEnabled: env.googlePeopleApiEnabled,
     note: 'Este callbackUrl debe existir exactamente igual en Google Cloud > Authorized redirect URIs.',
   });
 });
@@ -17,7 +18,7 @@ router.get('/google/config', (_req, res) => {
 router.get(
   '/google',
   passport.authenticate('google', {
-    scope: ['profile', 'email', 'https://www.googleapis.com/auth/user.addresses.read'],
+    scope: env.googleOAuthScopes,
     session: true,
   })
 );

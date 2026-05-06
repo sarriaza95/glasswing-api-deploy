@@ -1,3 +1,4 @@
+const env = require('../config/env');
 const countryDisplayNames = new Intl.DisplayNames(['es'], { type: 'region' });
 
 const normalizeCountryCode = (value) => {
@@ -68,6 +69,10 @@ const getCountryFromGoogle = async (accessToken, profile) => {
       name: getCountryName(profileLocaleCountryCode),
       source: 'google_oauth_locale',
     };
+  }
+
+  if (!env.googlePeopleApiEnabled) {
+    return null;
   }
 
   const peopleProfile = await fetchGooglePeopleProfile(accessToken);
