@@ -1,6 +1,7 @@
 const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const env = require('./env');
+const { persistGoogleUser } = require('../services/authUserService');
 
 passport.use(
   new GoogleStrategy(
@@ -10,17 +11,12 @@ passport.use(
       callbackURL: env.googleCallbackUrl,
     },
     async (_accessToken, _refreshToken, profile, done) => {
-      const user = {
-        provider: 'google',
-        id: profile.id,
-        displayName: profile.displayName,
-        firstName: profile.name?.givenName || '',
-        lastName: profile.name?.familyName || '',
-        email: profile.emails?.[0]?.value || null,
-        photo: profile.photos?.[0]?.value || null,
-      };
-
-      return done(null, user);
+      try {
+        const user = await persistGoogleUser(profile);
+        return done(null, user);
+      } catch (error) {
+        return done(error);
+      }
     }
   )
 );

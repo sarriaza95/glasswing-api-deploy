@@ -4,7 +4,6 @@ const env = require('../config/env');
 
 const router = express.Router();
 
-
 router.get('/google/config', (_req, res) => {
   res.json({
     loginUrl: `${env.apiBaseUrl}/api/auth/google`,

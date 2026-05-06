@@ -16,4 +16,8 @@ module.exports = {
   sessionSecret: process.env.SESSION_SECRET || 'dev-secret',
   googleClientId: process.env.GOOGLE_CLIENT_ID,
   googleClientSecret: process.env.GOOGLE_CLIENT_SECRET,
+  defaultVolunteerRoleName: process.env.DEFAULT_VOLUNTEER_ROLE_NAME || 'Volunteer',
+  defaultCountryCode: process.env.DEFAULT_COUNTRY_CODE || 'SV',
+  defaultCountryName: process.env.DEFAULT_COUNTRY_NAME || 'El Salvador',
+  defaultCountryRegion: process.env.DEFAULT_COUNTRY_REGION || 'Central America',
 };

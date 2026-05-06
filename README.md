@@ -31,6 +31,13 @@ cp .env.example .env
 - `DB_PASSWORD`
 - `DB_NAME`
 
+4. Configura asignación automática para usuarios Google:
+
+- `DEFAULT_VOLUNTEER_ROLE_NAME` (por defecto `Volunteer`)
+- `DEFAULT_COUNTRY_CODE` (por defecto `SV`)
+- `DEFAULT_COUNTRY_NAME` (por defecto `El Salvador`)
+- `DEFAULT_COUNTRY_REGION` (por defecto `Central America`)
+
 ## Instalación y ejecución
 
 ```bash
@@ -82,6 +89,16 @@ http://localhost:3000/api/auth/google/config
 ```
 
 Si Google muestra `Error 400: redirect_uri_mismatch`, revisa que el valor `callbackUrl` de ese endpoint sea idéntico al URI registrado en Google Cloud. Debe coincidir en protocolo (`http`/`https`), host, puerto, ruta y slash final.
+
+### Persistencia automática de usuarios Google
+
+Después de un login exitoso con Google, la API guarda o actualiza al usuario en la tabla `users`. Durante ese proceso:
+
+- Busca o crea el rol configurado en `DEFAULT_VOLUNTEER_ROLE_NAME`.
+- Busca o crea el país configurado en `DEFAULT_COUNTRY_CODE`, `DEFAULT_COUNTRY_NAME` y `DEFAULT_COUNTRY_REGION`.
+- Asigna ese rol y país al usuario autenticado.
+- Actualiza `last_login_at`.
+- Escribe en consola `Google SSO user assigned` con el usuario, rol y país asignados.
 
 ## Endpoints CRUD (todas las tablas)
 
