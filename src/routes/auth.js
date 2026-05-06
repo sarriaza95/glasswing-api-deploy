@@ -4,6 +4,18 @@ const env = require('../config/env');
 
 const router = express.Router();
 
+const appendErrorParams = (url, error) => {
+  const redirectUrl = new URL(url);
+  redirectUrl.searchParams.set('code', error.code || 'AUTH_ERROR');
+  redirectUrl.searchParams.set('message', error.message || 'Error autenticando con Google');
+
+  if (error.details) {
+    redirectUrl.searchParams.set('details', JSON.stringify(error.details));
+  }
+
+  return redirectUrl.toString();
+};
+
 router.get('/google/config', (_req, res) => {
   res.json({
     loginUrl: `${env.apiBaseUrl}/api/auth/google`,
@@ -23,23 +35,45 @@ router.get(
   })
 );
 
-router.get(
-  '/google/callback',
-  passport.authenticate('google', {
-    failureRedirect: '/api/auth/failure',
-    session: true,
-  }),
-  (req, res) => {
-    if (env.frontendSuccessUrl) {
-      return res.redirect(env.frontendSuccessUrl);
+router.get('/google/callback', (req, res, next) => {
+  passport.authenticate('google', { session: true }, (error, user) => {
+    if (error) {
+      console.error('Google authentication failed', {
+        code: error.code,
+        message: error.message,
+        details: error.details,
+      });
+
+      if (env.frontendErrorUrl) {
+        return res.redirect(appendErrorParams(env.frontendErrorUrl, error));
+      }
+
+      return res.status(error.statusCode || 401).json({
+        message: 'Error autenticando con Google',
+        code: error.code,
+        detail: error.message,
+        details: error.details,
+      });
     }
 
-    return res.json({
-      message: 'Login con Google completado',
-      user: req.user,
+    if (!user) {
+      return res.redirect('/api/auth/failure');
+    }
+
+    return req.logIn(user, (loginError) => {
+      if (loginError) return next(loginError);
+
+      if (env.frontendSuccessUrl) {
+        return res.redirect(env.frontendSuccessUrl);
+      }
+
+      return res.json({
+        message: 'Login con Google completado',
+        user: req.user,
+      });
     });
-  }
-);
+  })(req, res, next);
+});
 
 router.get('/me', (req, res) => {
   if (!req.isAuthenticated()) {

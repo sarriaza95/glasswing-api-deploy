@@ -131,12 +131,6 @@ const persistGoogleUser = async (profile, accessToken) => {
 
   const googleCountry = await getCountryFromGoogle(accessToken, profile);
 
-  if (!googleCountry?.code || !googleCountry?.name) {
-    throw new Error(
-      'No se pudo asignar país porque Google no devolvió país o código ISO de país para el usuario autenticado'
-    );
-  }
-
   const connection = await pool.getConnection();
 
   try {

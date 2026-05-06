@@ -75,6 +75,7 @@ API_BASE_URL=http://localhost:3000
 GOOGLE_CALLBACK_URL=http://localhost:3000/api/auth/google/callback
 GOOGLE_PEOPLE_API_ENABLED=false
 FRONTEND_SUCCESS_URL=http://localhost:5173/auth/success
+FRONTEND_AUTH_ERROR_URL=http://localhost:5173/auth/error
 ```
 
 Para iniciar el login, abre:
@@ -102,7 +103,9 @@ Después de un login exitoso con Google, la API guarda o actualiza al usuario en
 - Actualiza `last_login_at`.
 - Escribe en consola `Google SSO user assigned` con el usuario, rol y país finalmente asignados.
 
-Si Google no devuelve país o código ISO de país, el login falla porque `users.country_id` es obligatorio y no se asigna ningún país por defecto. Si activas Google People API mientras la pantalla OAuth sigue en modo Testing, agrega el correo que prueba el login en Google Cloud > OAuth consent screen > Test users; si no, Google puede mostrar `Error 403: access_denied` por app no verificada.
+Si Google no devuelve país o código ISO de país, el login falla porque `users.country_id` es obligatorio y no se asigna ningún país por defecto. En ese caso el backend redirige a `FRONTEND_AUTH_ERROR_URL` con `code`, `message` y `details` para que el frontend pueda mostrar una explicación clara.
+
+Si activas Google People API mientras la pantalla OAuth sigue en modo Testing, agrega el correo que prueba el login en Google Cloud > OAuth consent screen > Test users; si no, Google puede mostrar `Error 403: access_denied` por app no verificada. Habilitar la API no basta: también necesitas usuario de prueba o verificación de app cuando pides scopes sensibles.
 
 ## Endpoints CRUD (todas las tablas)
 
