@@ -1,7 +1,6 @@
 const express = require('express');
 const passport = require('../config/passport');
 const env = require('../config/env');
-const { countryPortalMappings, detectCountryFromRequest } = require('../services/countryPortalService');
 
 const router = express.Router();
 
@@ -10,30 +9,15 @@ router.get('/google/config', (_req, res) => {
     loginUrl: `${env.apiBaseUrl}/api/auth/google`,
     callbackUrl: env.googleCallbackUrl,
     googleCloudAuthorizedRedirectUri: env.googleCallbackUrl,
-    countryPortalMappings,
+    googleCountryScopes: ['profile', 'email', 'https://www.googleapis.com/auth/user.addresses.read'],
     note: 'Este callbackUrl debe existir exactamente igual en Google Cloud > Authorized redirect URIs.',
   });
 });
 
 router.get(
   '/google',
-  (req, res, next) => {
-    const detectedCountry = detectCountryFromRequest(req);
-
-    if (!detectedCountry) {
-      return res.status(400).json({
-        message: 'No se pudo detectar el país desde la URL de entrada del portal',
-        detail:
-          'Abre el login desde un portal configurado por país o envía entryUrl con la URL original del portal. Ejemplo: /api/auth/google?entryUrl=https://sv.example.com',
-        supportedCountryPortalMappings: countryPortalMappings,
-      });
-    }
-
-    req.session.registrationCountry = detectedCountry;
-    return next();
-  },
   passport.authenticate('google', {
-    scope: ['profile', 'email'],
+    scope: ['profile', 'email', 'https://www.googleapis.com/auth/user.addresses.read'],
     session: true,
   })
 );

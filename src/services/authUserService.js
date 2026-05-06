@@ -1,5 +1,6 @@
 const pool = require('../config/db');
 const env = require('../config/env');
+const { getCountryFromGoogle } = require('./googleProfileService');
 
 const buildNameParts = (profile) => {
   const emailPrefix = profile.emails?.[0]?.value?.split('@')[0] || 'google-user';
@@ -42,20 +43,20 @@ const getOrCreateVolunteerRole = async (connection) => {
   return roles[0];
 };
 
-const getOrCreatePortalCountry = async (connection, portalCountry) => {
+const getOrCreateGoogleCountry = async (connection, googleCountry) => {
   const [existingCountries] = await connection.execute('SELECT * FROM countries WHERE code = ? LIMIT 1', [
-    portalCountry.code,
+    googleCountry.code,
   ]);
 
   if (existingCountries.length) return existingCountries[0];
 
   await connection.execute(
     'INSERT IGNORE INTO countries (code, name, region, status) VALUES (?, ?, ?, ?)',
-    [portalCountry.code, portalCountry.name, portalCountry.region || null, 'active']
+    [googleCountry.code, googleCountry.name, googleCountry.region || null, 'active']
   );
 
   const [countries] = await connection.execute('SELECT * FROM countries WHERE code = ? LIMIT 1', [
-    portalCountry.code,
+    googleCountry.code,
   ]);
   return countries[0];
 };
@@ -85,7 +86,7 @@ const upsertGoogleUser = async (connection, googleUser, role, country) => {
   if (existingUser) {
     await connection.execute(
       `UPDATE users
-       SET google_id = ?, email = ?, first_name = ?, last_name = ?, profile_image_url = ?, status = 'active', last_login_at = CURRENT_TIMESTAMP
+       SET google_id = ?, email = ?, first_name = ?, last_name = ?, profile_image_url = ?, role_id = ?, country_id = ?, status = 'active', last_login_at = CURRENT_TIMESTAMP
        WHERE id = ?`,
       [
         googleUser.googleId,
@@ -93,6 +94,8 @@ const upsertGoogleUser = async (connection, googleUser, role, country) => {
         googleUser.firstName,
         googleUser.lastName,
         googleUser.profileImageUrl,
+        role.id,
+        country.id,
         existingUser.id,
       ]
     );
@@ -119,15 +122,19 @@ const upsertGoogleUser = async (connection, googleUser, role, country) => {
   return users[0];
 };
 
-const persistGoogleUser = async (profile, portalCountry) => {
+const persistGoogleUser = async (profile, accessToken) => {
   const googleUser = mapGoogleProfile(profile);
 
   if (!googleUser.email) {
     throw new Error('Google no devolvió un email para el usuario autenticado');
   }
 
-  if (!portalCountry?.code || !portalCountry?.name) {
-    throw new Error('No se pudo asignar país porque no se detectó un portal de entrada válido');
+  const googleCountry = await getCountryFromGoogle(accessToken, profile);
+
+  if (!googleCountry?.code || !googleCountry?.name) {
+    throw new Error(
+      'No se pudo asignar país porque Google no devolvió país o código ISO de país para el usuario autenticado'
+    );
   }
 
   const connection = await pool.getConnection();
@@ -136,8 +143,8 @@ const persistGoogleUser = async (profile, portalCountry) => {
     await connection.beginTransaction();
 
     const role = await getOrCreateVolunteerRole(connection);
-    const portalAssignedCountry = await getOrCreatePortalCountry(connection, portalCountry);
-    const user = await upsertGoogleUser(connection, googleUser, role, portalAssignedCountry);
+    const googleAssignedCountry = await getOrCreateGoogleCountry(connection, googleCountry);
+    const user = await upsertGoogleUser(connection, googleUser, role, googleAssignedCountry);
     const assignedRole = await getUserRole(connection, user.role_id);
     const assignedCountry = await getUserCountry(connection, user.country_id);
 
@@ -161,6 +168,7 @@ const persistGoogleUser = async (profile, portalCountry) => {
         id: assignedCountry?.id,
         code: assignedCountry?.code,
         name: assignedCountry?.name,
+        source: googleCountry.source,
       },
     };
 

@@ -31,10 +31,11 @@ cp .env.example .env
 - `DB_PASSWORD`
 - `DB_NAME`
 
-4. Configura asignación automática por portal de entrada:
+4. Configura asignación automática con Google:
 
 - `DEFAULT_VOLUNTEER_ROLE_NAME` (por defecto `Volunteer`)
-- `COUNTRY_PORTAL_MAPPINGS` para mapear subdominios/URLs de entrada a países. Por defecto incluye El Salvador con tokens `sv`, `elsalvador`, `el-salvador` y `salvador`.
+- Habilita Google People API en Google Cloud para el mismo proyecto OAuth.
+- El login solicita el scope `https://www.googleapis.com/auth/user.addresses.read` para leer país desde Google.
 
 ## Instalación y ejecución
 
@@ -74,10 +75,10 @@ GOOGLE_CALLBACK_URL=http://localhost:3000/api/auth/google/callback
 FRONTEND_SUCCESS_URL=http://localhost:5173/auth/success
 ```
 
-Para iniciar el login desde un portal de país, abre la URL del portal correspondiente. Para pruebas locales puedes enviar la URL de entrada original con `entryUrl`:
+Para iniciar el login, abre:
 
 ```text
-http://localhost:3000/api/auth/google?entryUrl=https://sv.example.com
+http://localhost:3000/api/auth/google
 ```
 
 Para diagnosticar qué callback está enviando la API a Google, abre:
@@ -92,19 +93,14 @@ Si Google muestra `Error 400: redirect_uri_mismatch`, revisa que el valor `callb
 
 Después de un login exitoso con Google, la API guarda o actualiza al usuario en la tabla `users`. Durante ese proceso:
 
-- Detecta el país desde la URL/subdominio de entrada del portal antes de redirigir a Google.
-- Guarda el país detectado en sesión durante el flujo OAuth.
+- Lee el país desde la información de Google usando el locale del perfil OAuth o Google People API.
 - Busca o crea el rol configurado en `DEFAULT_VOLUNTEER_ROLE_NAME`.
-- Busca o crea el país detectado desde `COUNTRY_PORTAL_MAPPINGS`.
-- Para usuarios nuevos, asigna automáticamente el rol de voluntario y el país detectado.
-- Para usuarios existentes, actualiza datos de Google y `last_login_at`, pero no sobreescribe `country_id` para respetar cambios hechos por un administrador desde el panel.
+- Busca o crea el país devuelto por Google, por ejemplo `NI` / `Nicaragua`.
+- Asigna al usuario el rol de voluntario y el país devuelto por Google, sin valores de país por defecto.
+- Actualiza `last_login_at`.
 - Escribe en consola `Google SSO user assigned` con el usuario, rol y país finalmente asignados.
 
-Ejemplo de mapping para El Salvador:
-
-```env
-COUNTRY_PORTAL_MAPPINGS=[{"code":"SV","name":"El Salvador","region":"Central America","hosts":["sv","elsalvador","el-salvador","salvador"]}]
-```
+Si Google no devuelve país o código ISO de país, el login falla porque `users.country_id` es obligatorio y no se asigna ningún país por defecto.
 
 ## Endpoints CRUD (todas las tablas)
 
