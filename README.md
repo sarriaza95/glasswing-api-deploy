@@ -1,7 +1,6 @@
 # glasswing-api-deploy
 
 API en Express.js con autenticación SSO de Google y CRUD para las tablas del esquema MySQL.
-API base en Express.js con autenticación SSO de Google (sin persistencia en base de datos por ahora).
 
 ## Requisitos
 
@@ -18,7 +17,6 @@ cp .env.example .env
 ```
 
 2. Configura OAuth de Google:
-2. Completa:
 
 - `GOOGLE_CLIENT_ID`
 - `GOOGLE_CLIENT_SECRET`
@@ -45,11 +43,35 @@ Servidor por defecto en `http://localhost:3000`.
 ## Endpoints Auth
 
 - `GET /health`
-- `GET /auth/google`
-- `GET /auth/google/callback`
-- `GET /auth/me`
-- `GET /auth/logout`
-- `GET /auth/failure`
+- `GET /api/auth/google`
+- `GET /api/auth/google/callback`
+- `GET /api/auth/me`
+- `GET /api/auth/logout`
+- `GET /api/auth/failure`
+
+
+### Configuración correcta para Google OAuth local
+
+El `GOOGLE_CALLBACK_URL` debe coincidir exactamente con uno de los **URIs de redireccionamiento autorizados** configurados en Google Cloud. Si el backend se mantiene en el puerto `3000`, no uses el callback con puerto `4000`; registra este URI en Google Cloud:
+
+```text
+http://localhost:3000/api/auth/google/callback
+```
+
+Y usa estas variables:
+
+```env
+PORT=3000
+CLIENT_URL=http://localhost:5173
+GOOGLE_CALLBACK_URL=http://localhost:3000/api/auth/google/callback
+FRONTEND_SUCCESS_URL=http://localhost:5173/auth/success
+```
+
+Para iniciar el login, abre:
+
+```text
+http://localhost:3000/api/auth/google
+```
 
 ## Endpoints CRUD (todas las tablas)
 
@@ -92,14 +114,3 @@ curl -X POST http://localhost:3000/api/roles \
 ## Nota
 
 El CRUD es genérico por tabla y usa el campo `id` como primary key para rutas `/:id`, alineado con tu script SQL.
-## Endpoints
-
-- `GET /health` -> estado del servicio
-- `GET /auth/google` -> inicia OAuth con Google
-- `GET /auth/google/callback` -> callback OAuth
-- `GET /auth/me` -> obtiene usuario autenticado en sesión
-- `GET /auth/logout` -> cierra sesión
-
-## Nota sobre MySQL
-
-No se guarda información todavía. El flujo actual deja listo el login y la sesión en memoria para después conectar MySQL y persistir usuarios/roles cuando se requiera.

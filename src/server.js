@@ -3,6 +3,7 @@ require('dotenv').config();
 const express = require('express');
 const session = require('express-session');
 const passport = require('./config/passport');
+const authRouter = require('./routes/auth');
 const crudRouter = require('./routes/crud');
 
 const app = express();
@@ -34,55 +35,8 @@ app.get('/health', (_req, res) => {
   });
 });
 
-app.get(
-  '/auth/google',
-  passport.authenticate('google', {
-    scope: ['profile', 'email'],
-    session: true,
-  })
-);
-
-app.get(
-  '/auth/google/callback',
-  passport.authenticate('google', {
-    failureRedirect: '/auth/failure',
-    session: true,
-  }),
-  (req, res) => {
-    if (process.env.FRONTEND_SUCCESS_URL) {
-      return res.redirect(process.env.FRONTEND_SUCCESS_URL);
-    }
-
-    return res.json({
-      message: 'Login con Google completado',
-      user: req.user,
-    });
-  }
-);
-
-app.get('/auth/me', (req, res) => {
-  if (!req.isAuthenticated()) {
-    return res.status(401).json({ message: 'No autenticado' });
-  }
-
-  return res.json({ user: req.user });
-});
-
-app.get('/auth/logout', (req, res, next) => {
-  req.logout((err) => {
-    if (err) {
-      return next(err);
-    }
-
-    req.session.destroy(() => {
-      res.json({ message: 'Sesión cerrada' });
-    });
-  });
-});
-
-app.get('/auth/failure', (_req, res) => {
-  res.status(401).json({ message: 'Error autenticando con Google' });
-});
+app.use('/api/auth', authRouter);
+app.use('/auth', authRouter);
 
 app.use('/api', crudRouter);
 
