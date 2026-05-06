@@ -1,9 +1,18 @@
 const express = require('express');
 const passport = require('../config/passport');
+const env = require('../config/env');
 
 const router = express.Router();
 
-const frontendSuccessUrl = process.env.FRONTEND_SUCCESS_URL || process.env.CLIENT_URL;
+
+router.get('/google/config', (_req, res) => {
+  res.json({
+    loginUrl: `${env.apiBaseUrl}/api/auth/google`,
+    callbackUrl: env.googleCallbackUrl,
+    googleCloudAuthorizedRedirectUri: env.googleCallbackUrl,
+    note: 'Este callbackUrl debe existir exactamente igual en Google Cloud > Authorized redirect URIs.',
+  });
+});
 
 router.get(
   '/google',
@@ -20,8 +29,8 @@ router.get(
     session: true,
   }),
   (req, res) => {
-    if (frontendSuccessUrl) {
-      return res.redirect(frontendSuccessUrl);
+    if (env.frontendSuccessUrl) {
+      return res.redirect(env.frontendSuccessUrl);
     }
 
     return res.json({
