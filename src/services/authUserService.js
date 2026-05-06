@@ -1,5 +1,6 @@
 const pool = require('../config/db');
 const env = require('../config/env');
+const { getCountryFromGoogle } = require('./googleProfileService');
 
 const buildNameParts = (profile) => {
   const emailPrefix = profile.emails?.[0]?.value?.split('@')[0] || 'google-user';
@@ -42,22 +43,32 @@ const getOrCreateVolunteerRole = async (connection) => {
   return roles[0];
 };
 
-const getOrCreateDefaultCountry = async (connection) => {
+const getOrCreateGoogleCountry = async (connection, googleCountry) => {
   const [existingCountries] = await connection.execute('SELECT * FROM countries WHERE code = ? LIMIT 1', [
-    env.defaultCountryCode,
+    googleCountry.code,
   ]);
 
   if (existingCountries.length) return existingCountries[0];
 
   await connection.execute(
     'INSERT IGNORE INTO countries (code, name, region, status) VALUES (?, ?, ?, ?)',
-    [env.defaultCountryCode, env.defaultCountryName, env.defaultCountryRegion, 'active']
+    [googleCountry.code, googleCountry.name, googleCountry.region || null, 'active']
   );
 
   const [countries] = await connection.execute('SELECT * FROM countries WHERE code = ? LIMIT 1', [
-    env.defaultCountryCode,
+    googleCountry.code,
   ]);
   return countries[0];
+};
+
+const getUserRole = async (connection, roleId) => {
+  const [roles] = await connection.execute('SELECT * FROM roles WHERE id = ? LIMIT 1', [roleId]);
+  return roles[0] || null;
+};
+
+const getUserCountry = async (connection, countryId) => {
+  const [countries] = await connection.execute('SELECT * FROM countries WHERE id = ? LIMIT 1', [countryId]);
+  return countries[0] || null;
 };
 
 const findExistingUser = async (connection, googleUser) => {
@@ -111,11 +122,19 @@ const upsertGoogleUser = async (connection, googleUser, role, country) => {
   return users[0];
 };
 
-const persistGoogleUser = async (profile) => {
+const persistGoogleUser = async (profile, accessToken) => {
   const googleUser = mapGoogleProfile(profile);
 
   if (!googleUser.email) {
     throw new Error('Google no devolvió un email para el usuario autenticado');
+  }
+
+  const googleCountry = await getCountryFromGoogle(accessToken, profile);
+
+  if (!googleCountry?.code || !googleCountry?.name) {
+    throw new Error(
+      'No se pudo asignar país porque Google no devolvió país o código ISO de país para el usuario autenticado'
+    );
   }
 
   const connection = await pool.getConnection();
@@ -124,8 +143,10 @@ const persistGoogleUser = async (profile) => {
     await connection.beginTransaction();
 
     const role = await getOrCreateVolunteerRole(connection);
-    const country = await getOrCreateDefaultCountry(connection);
-    const user = await upsertGoogleUser(connection, googleUser, role, country);
+    const googleAssignedCountry = await getOrCreateGoogleCountry(connection, googleCountry);
+    const user = await upsertGoogleUser(connection, googleUser, role, googleAssignedCountry);
+    const assignedRole = await getUserRole(connection, user.role_id);
+    const assignedCountry = await getUserCountry(connection, user.country_id);
 
     await connection.commit();
 
@@ -140,13 +161,14 @@ const persistGoogleUser = async (profile) => {
       photo: user.profile_image_url,
       status: user.status,
       role: {
-        id: role.id,
-        name: role.name,
+        id: assignedRole?.id,
+        name: assignedRole?.name,
       },
       country: {
-        id: country.id,
-        code: country.code,
-        name: country.name,
+        id: assignedCountry?.id,
+        code: assignedCountry?.code,
+        name: assignedCountry?.name,
+        source: googleCountry.source,
       },
     };
 
