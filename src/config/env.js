@@ -16,4 +16,5 @@ module.exports = {
   sessionSecret: process.env.SESSION_SECRET || 'dev-secret',
   googleClientId: process.env.GOOGLE_CLIENT_ID,
   googleClientSecret: process.env.GOOGLE_CLIENT_SECRET,
+  defaultVolunteerRoleName: process.env.DEFAULT_VOLUNTEER_ROLE_NAME || 'Volunteer',
 };

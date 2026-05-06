@@ -31,6 +31,12 @@ cp .env.example .env
 - `DB_PASSWORD`
 - `DB_NAME`
 
+4. Configura asignación automática con Google:
+
+- `DEFAULT_VOLUNTEER_ROLE_NAME` (por defecto `Volunteer`)
+- Habilita Google People API en Google Cloud para el mismo proyecto OAuth.
+- El login solicita el scope `https://www.googleapis.com/auth/user.addresses.read` para leer país desde Google.
+
 ## Instalación y ejecución
 
 ```bash
@@ -82,6 +88,19 @@ http://localhost:3000/api/auth/google/config
 ```
 
 Si Google muestra `Error 400: redirect_uri_mismatch`, revisa que el valor `callbackUrl` de ese endpoint sea idéntico al URI registrado en Google Cloud. Debe coincidir en protocolo (`http`/`https`), host, puerto, ruta y slash final.
+
+### Persistencia automática de usuarios Google
+
+Después de un login exitoso con Google, la API guarda o actualiza al usuario en la tabla `users`. Durante ese proceso:
+
+- Lee el país desde la información de Google usando el locale del perfil OAuth o Google People API.
+- Busca o crea el rol configurado en `DEFAULT_VOLUNTEER_ROLE_NAME`.
+- Busca o crea el país devuelto por Google, por ejemplo `NI` / `Nicaragua`.
+- Asigna al usuario el rol de voluntario y el país devuelto por Google, sin valores de país por defecto.
+- Actualiza `last_login_at`.
+- Escribe en consola `Google SSO user assigned` con el usuario, rol y país finalmente asignados.
+
+Si Google no devuelve país o código ISO de país, el login falla porque `users.country_id` es obligatorio y no se asigna ningún país por defecto.
 
 ## Endpoints CRUD (todas las tablas)
 
