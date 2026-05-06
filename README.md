@@ -44,6 +44,7 @@ Servidor por defecto en `http://localhost:3000`.
 
 - `GET /health`
 - `GET /api/auth/google`
+- `GET /api/auth/google/config`
 - `GET /api/auth/google/callback`
 - `GET /api/auth/me`
 - `GET /api/auth/logout`
@@ -63,6 +64,7 @@ Y usa estas variables:
 ```env
 PORT=3000
 CLIENT_URL=http://localhost:5173
+API_BASE_URL=http://localhost:3000
 GOOGLE_CALLBACK_URL=http://localhost:3000/api/auth/google/callback
 FRONTEND_SUCCESS_URL=http://localhost:5173/auth/success
 ```
@@ -72,6 +74,14 @@ Para iniciar el login, abre:
 ```text
 http://localhost:3000/api/auth/google
 ```
+
+Para diagnosticar qué callback está enviando la API a Google, abre:
+
+```text
+http://localhost:3000/api/auth/google/config
+```
+
+Si Google muestra `Error 400: redirect_uri_mismatch`, revisa que el valor `callbackUrl` de ese endpoint sea idéntico al URI registrado en Google Cloud. Debe coincidir en protocolo (`http`/`https`), host, puerto, ruta y slash final.
 
 ## Endpoints CRUD (todas las tablas)
 

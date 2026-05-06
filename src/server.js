@@ -1,19 +1,18 @@
-require('dotenv').config();
-
 const express = require('express');
 const session = require('express-session');
+const env = require('./config/env');
 const passport = require('./config/passport');
 const authRouter = require('./routes/auth');
 const crudRouter = require('./routes/crud');
 
 const app = express();
-const port = process.env.PORT || 3000;
+const port = env.port;
 
 app.use(express.json());
 
 app.use(
   session({
-    secret: process.env.SESSION_SECRET || 'dev-secret',
+    secret: env.sessionSecret,
     resave: false,
     saveUninitialized: false,
     cookie: {
@@ -58,4 +57,5 @@ app.use((err, _req, res, _next) => {
 app.listen(port, () => {
   // eslint-disable-next-line no-console
   console.log(`Server listening on http://localhost:${port}`);
+  console.log(`Google OAuth callback URL: ${env.googleCallbackUrl}`);
 });
