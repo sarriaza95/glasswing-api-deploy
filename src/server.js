@@ -2,11 +2,19 @@ require('dotenv').config();
 
 const express = require('express');
 const session = require('express-session');
+const cors = require('cors');
 const passport = require('./config/passport');
 const crudRouter = require('./routes/crud');
 
 const app = express();
 const port = process.env.PORT || 3000;
+
+app.use(
+  cors({
+    origin: 'http://localhost:3001',
+    credentials: true,
+  })
+);
 
 app.use(express.json());
 
