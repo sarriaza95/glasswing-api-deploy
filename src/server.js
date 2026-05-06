@@ -1,3 +1,5 @@
+require('dotenv').config();
+
 const express = require('express');
 const session = require('express-session');
 const cors = require('cors');
@@ -6,11 +8,11 @@ const authRouter = require('./routes/auth');
 const crudRouter = require('./routes/crud');
 
 const app = express();
-const port = env.port;
+const port = process.env.PORT || 3000;
 
 app.use(
   cors({
-    origin: 'http://localhost:3001',
+    origin: process.env.CLIENT_URL,
     credentials: true,
   })
 );
@@ -19,7 +21,7 @@ app.use(express.json());
 
 app.use(
   session({
-    secret: env.sessionSecret,
+    secret: process.env.SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
     cookie: {
@@ -47,7 +49,6 @@ app.use('/auth', authRouter);
 app.use('/api', crudRouter);
 
 app.use((err, _req, res, _next) => {
-  // eslint-disable-next-line no-console
   console.error(err);
 
   if (err && err.code) {
@@ -58,11 +59,14 @@ app.use((err, _req, res, _next) => {
     });
   }
 
-  return res.status(500).json({ message: 'Error interno del servidor' });
+  return res.status(500).json({
+    message: 'Error interno del servidor',
+  });
 });
 
 app.listen(port, () => {
-  // eslint-disable-next-line no-console
   console.log(`Server listening on http://localhost:${port}`);
-  console.log(`Google OAuth callback URL: ${env.googleCallbackUrl}`);
+  console.log(
+    `Google OAuth callback URL: ${process.env.GOOGLE_CALLBACK_URL}`
+  );
 });
