@@ -8,14 +8,14 @@ Copia `.env.example` a `.env` y completa tus credenciales:
 
 ```env
 PORT=3000
-CLIENT_URL=http://localhost:5173
+CLIENT_URL=http://localhost:3001
 API_BASE_URL=http://localhost:3000
 SESSION_SECRET=replace-with-a-long-random-secret
 GOOGLE_CLIENT_ID=your-google-client-id
 GOOGLE_CLIENT_SECRET=your-google-client-secret
 GOOGLE_CALLBACK_URL=http://localhost:3000/api/auth/google/callback
-FRONTEND_SUCCESS_URL=http://localhost:5173/auth/success
-FRONTEND_AUTH_ERROR_URL=http://localhost:5173/auth/error
+FRONTEND_SUCCESS_URL=http://localhost:3001/auth/success
+FRONTEND_AUTH_ERROR_URL=http://localhost:3001/auth/error
 DB_HOST=localhost
 DB_PORT=3306
 DB_USER=root
@@ -27,7 +27,7 @@ DEFAULT_VOLUNTEER_ROLE_NAME=Volunteer
 
 ### Configuración opcional de países por portal
 
-El país **no se toma de Google** y **no se asigna por defecto**. Se detecta antes de iniciar Google OAuth usando el portal de entrada: query params, URL de entrada, `Referer`, `Origin`, host/subdominio o path.
+El país **no se toma de Google** y **no se asigna por defecto**. Se intenta detectar antes de iniciar Google OAuth usando el portal de entrada: query params, URL de entrada, `Referer`, `Origin`, host/subdominio o path. Si no se detecta país, la API ya no bloquea la redirección a Google; el login OAuth continúa. Solo se requiere país al crear un usuario nuevo, porque `users.country_id` es obligatorio.
 
 Por defecto se incluyen países de Centroamérica:
 
@@ -45,9 +45,10 @@ Puedes reemplazar o ampliar esos mapeos con `COUNTRY_PORTAL_MAPPINGS` como JSON:
 COUNTRY_PORTAL_MAPPINGS=[{"code":"SV","name":"El Salvador","region":"Central America","aliases":["sv","el-salvador","elsalvador","salvador"]},{"code":"NI","name":"Nicaragua","region":"Central America","aliases":["ni","nicaragua"]}]
 ```
 
-Cada `alias` se compara contra partes del host, subdominio, path y query string. Por ejemplo, todas estas entradas pueden asignar El Salvador sin pedir dato manual al usuario:
+Cada `alias` se compara contra partes del host, subdominio, path y query string. En local, como `localhost:3001` no tiene país en el dominio ni en la ruta, el frontend debe enviar `country` o `entryUrl` al iniciar el login si el usuario todavía no existe. Por ejemplo, todas estas entradas pueden asignar El Salvador sin pedir dato manual al usuario:
 
 ```text
+http://localhost:3000/auth/google?country=SV
 http://localhost:3000/api/auth/google?country=SV
 http://localhost:3000/api/auth/google?entryUrl=https://el-salvador.example.com/registro
 http://localhost:3000/api/auth/google?entryUrl=https://example.com/el-salvador/registro
@@ -56,6 +57,7 @@ http://localhost:3000/api/auth/google?entryUrl=https://example.com/el-salvador/r
 Para Nicaragua:
 
 ```text
+http://localhost:3000/auth/google?country=NI
 http://localhost:3000/api/auth/google?country=NI
 http://localhost:3000/api/auth/google?entryUrl=https://nicaragua.example.com/registro
 http://localhost:3000/api/auth/google?entryUrl=https://example.com/nicaragua/registro
@@ -100,7 +102,7 @@ Si Google muestra `Error 400: redirect_uri_mismatch`, revisa que el valor `callb
 
 Después de un login exitoso con Google, la API guarda o actualiza al usuario en la tabla `users`. Durante ese proceso:
 
-- Detecta el país desde el portal de entrada **antes** de redirigir a Google.
+- Intenta detectar el país desde el portal de entrada **antes** de redirigir a Google.
 - Guarda el país detectado en sesión para usarlo al crear la cuenta durante el callback OAuth.
 - Busca o crea el rol configurado en `DEFAULT_VOLUNTEER_ROLE_NAME`.
 - Busca o crea el país detectado desde el portal.
@@ -108,7 +110,7 @@ Después de un login exitoso con Google, la API guarda o actualiza al usuario en
 - Para usuarios existentes, actualiza datos de Google y `last_login_at`, pero **no sobrescribe `country_id` ni `role_id`**, para permitir overrides desde el panel admin.
 - Escribe en consola `Google SSO user assigned` con el usuario, rol y país finalmente asignados.
 
-Si no se detecta país desde el portal de entrada, el login falla con `PORTAL_COUNTRY_NOT_FOUND` porque `users.country_id` es obligatorio y no se asigna ningún país por defecto.
+Si no se detecta país desde el portal de entrada, la redirección a Google no se bloquea. Si el usuario ya existe, puede iniciar sesión y se respeta el país guardado. Si el usuario es nuevo, la creación falla con `PORTAL_COUNTRY_NOT_FOUND` porque `users.country_id` es obligatorio y no se asigna ningún país por defecto; en ese caso inicia el login con `country=SV`, `country=NI`, etc., o con un `entryUrl` que contenga el país.
 
 ## Endpoints CRUD (todas las tablas)
 

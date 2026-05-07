@@ -1,7 +1,7 @@
 const express = require('express');
 const passport = require('../config/passport');
 const env = require('../config/env');
-const { requireCountryFromRequest } = require('../services/countryPortalService');
+const { detectCountryFromRequest } = require('../services/countryPortalService');
 
 const router = express.Router();
 
@@ -34,31 +34,25 @@ router.get('/google/config', (_req, res) => {
 });
 
 router.get('/google', (req, res, next) => {
-  try {
-    const registrationCountry = requireCountryFromRequest(req, env.countryPortalMappings);
+  const registrationCountry = detectCountryFromRequest(req, env.countryPortalMappings);
+
+  if (registrationCountry) {
     req.session.registrationCountry = registrationCountry;
+  } else {
+    delete req.session.registrationCountry;
 
-    return passport.authenticate('google', {
-      scope: env.googleOAuthScopes,
-      session: true,
-    })(req, res, next);
-  } catch (error) {
-    console.error('Entry portal country detection failed', {
-      code: error.code,
-      message: error.message,
-      details: error.details,
-    });
-
-    if (env.frontendErrorUrl) {
-      return res.redirect(appendErrorParams(env.frontendErrorUrl, error));
-    }
-
-    return res.status(error.statusCode || 422).json({
-      message: error.message,
-      code: error.code || 'PORTAL_COUNTRY_NOT_FOUND',
-      details: error.details,
+    console.warn('Entry portal country was not detected before Google OAuth', {
+      hint: 'El login continuará. Si el usuario es nuevo, envía country=SV o entryUrl con el país para poder crearlo automáticamente.',
+      referer: req.get('referer') || null,
+      origin: req.get('origin') || null,
+      currentUrl: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
     });
   }
+
+  return passport.authenticate('google', {
+    scope: env.googleOAuthScopes,
+    session: true,
+  })(req, res, next);
 });
 
 router.get('/google/callback', (req, res, next) => {
