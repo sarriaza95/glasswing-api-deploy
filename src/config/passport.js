@@ -9,10 +9,11 @@ passport.use(
       clientID: env.googleClientId,
       clientSecret: env.googleClientSecret,
       callbackURL: env.googleCallbackUrl,
+      passReqToCallback: true,
     },
-    async (accessToken, _refreshToken, profile, done) => {
+    async (req, _accessToken, _refreshToken, profile, done) => {
       try {
-        const user = await persistGoogleUser(profile, accessToken);
+        const user = await persistGoogleUser(profile, req.session?.registrationCountry);
         return done(null, user);
       } catch (error) {
         return done(error);

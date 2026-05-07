@@ -1,6 +1,7 @@
 const express = require('express');
 const passport = require('../config/passport');
 const env = require('../config/env');
+const { requireCountryFromRequest } = require('../services/countryPortalService');
 
 const router = express.Router();
 
@@ -22,18 +23,43 @@ router.get('/google/config', (_req, res) => {
     callbackUrl: env.googleCallbackUrl,
     googleCloudAuthorizedRedirectUri: env.googleCallbackUrl,
     googleOAuthScopes: env.googleOAuthScopes,
-    googlePeopleApiEnabled: env.googlePeopleApiEnabled,
-    note: 'Este callbackUrl debe existir exactamente igual en Google Cloud > Authorized redirect URIs.',
+    countryPortalMappings: env.countryPortalMappings,
+    entryPortalExamples: [
+      `${env.apiBaseUrl}/api/auth/google?country=SV`,
+      `${env.apiBaseUrl}/api/auth/google?entryUrl=https://el-salvador.example.com/registro`,
+      `${env.apiBaseUrl}/api/auth/google?entryUrl=https://example.com/nicaragua/registro`,
+    ],
+    note: 'Este callbackUrl debe existir exactamente igual en Google Cloud > Authorized redirect URIs. El país se detecta antes de enviar al usuario a Google usando country, entryUrl, Referer, Origin o URL actual.',
   });
 });
 
-router.get(
-  '/google',
-  passport.authenticate('google', {
-    scope: env.googleOAuthScopes,
-    session: true,
-  })
-);
+router.get('/google', (req, res, next) => {
+  try {
+    const registrationCountry = requireCountryFromRequest(req, env.countryPortalMappings);
+    req.session.registrationCountry = registrationCountry;
+
+    return passport.authenticate('google', {
+      scope: env.googleOAuthScopes,
+      session: true,
+    })(req, res, next);
+  } catch (error) {
+    console.error('Entry portal country detection failed', {
+      code: error.code,
+      message: error.message,
+      details: error.details,
+    });
+
+    if (env.frontendErrorUrl) {
+      return res.redirect(appendErrorParams(env.frontendErrorUrl, error));
+    }
+
+    return res.status(error.statusCode || 422).json({
+      message: error.message,
+      code: error.code || 'PORTAL_COUNTRY_NOT_FOUND',
+      details: error.details,
+    });
+  }
+});
 
 router.get('/google/callback', (req, res, next) => {
   passport.authenticate('google', { session: true }, (error, user) => {
