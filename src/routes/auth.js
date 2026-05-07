@@ -1,7 +1,7 @@
 const express = require('express');
 const passport = require('../config/passport');
 const env = require('../config/env');
-const { detectCountryFromRequest } = require('../services/countryPortalService');
+const { detectCountryFromInput, detectCountryFromRequest } = require('../services/countryPortalService');
 
 const router = express.Router();
 
@@ -17,6 +17,53 @@ const appendErrorParams = (url, error) => {
   return redirectUrl.toString();
 };
 
+const getSupportedCountries = () =>
+  env.countryPortalMappings.map(({ code, name, region, aliases }) => ({
+    code,
+    name,
+    region,
+    aliases,
+  }));
+
+const buildCountryNotFoundResponse = (input) => ({
+  message: 'No se pudo detectar país desde la información enviada por el sitio',
+  code: 'PORTAL_COUNTRY_NOT_FOUND',
+  received: input,
+  supportedCountries: getSupportedCountries(),
+  examples: [
+    { country: 'SV' },
+    { countryCode: 'NI' },
+    { entryUrl: 'https://example.com/el-salvador/registro' },
+  ],
+});
+
+router.post('/registration-country', (req, res) => {
+  const registrationCountry = detectCountryFromInput(req.body, env.countryPortalMappings, 'site_entry_api');
+
+  if (!registrationCountry) {
+    return res.status(422).json(buildCountryNotFoundResponse(req.body));
+  }
+
+  req.session.registrationCountry = registrationCountry;
+
+  return res.json({
+    message: 'País de registro guardado en sesión',
+    country: registrationCountry,
+  });
+});
+
+router.get('/registration-country', (req, res) => {
+  res.json({
+    country: req.session.registrationCountry || null,
+    supportedCountries: getSupportedCountries(),
+  });
+});
+
+router.delete('/registration-country', (req, res) => {
+  delete req.session.registrationCountry;
+  res.json({ message: 'País de registro eliminado de sesión' });
+});
+
 router.get('/google/config', (_req, res) => {
   res.json({
     loginUrl: `${env.apiBaseUrl}/api/auth/google`,
@@ -24,6 +71,11 @@ router.get('/google/config', (_req, res) => {
     googleCloudAuthorizedRedirectUri: env.googleCallbackUrl,
     googleOAuthScopes: env.googleOAuthScopes,
     countryPortalMappings: env.countryPortalMappings,
+    registrationCountryApi: {
+      set: `${env.apiBaseUrl}/api/auth/registration-country`,
+      get: `${env.apiBaseUrl}/api/auth/registration-country`,
+      clear: `${env.apiBaseUrl}/api/auth/registration-country`,
+    },
     entryPortalExamples: [
       `${env.apiBaseUrl}/api/auth/google?country=SV`,
       `${env.apiBaseUrl}/api/auth/google?entryUrl=https://el-salvador.example.com/registro`,
@@ -38,11 +90,10 @@ router.get('/google', (req, res, next) => {
 
   if (registrationCountry) {
     req.session.registrationCountry = registrationCountry;
-  } else {
-    delete req.session.registrationCountry;
-
-    console.warn('Entry portal country was not detected before Google OAuth', {
-      hint: 'El login continuará. Si el usuario es nuevo, envía country=SV o entryUrl con el país para poder crearlo automáticamente.',
+  } else if (!req.session.registrationCountry) {
+    console.warn('Entry site country was not available before Google OAuth', {
+      hint:
+        'El login continuará. Si el usuario es nuevo, primero guarda el país con POST /api/auth/registration-country o inicia con ?country=SV.',
       referer: req.get('referer') || null,
       origin: req.get('origin') || null,
       currentUrl: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
