@@ -148,18 +148,53 @@ const findCountryByCandidates = (candidates, mappings) => {
   );
 };
 
-const detectCountryFromRequest = (req, mappings) => {
-  const requestedCountry = req.query.country || req.query.countryCode || req.query.country_code || req.query.portalCountry;
-  const candidates = [requestedCountry, ...getRequestEntryUrls(req).flatMap(getPortalCandidatesFromUrl)].filter(Boolean);
-  const detectedCountry = findCountryByCandidates(candidates, mappings);
+const getCountryInputCandidates = (input = {}) => [
+  input.country,
+  input.countryCode,
+  input.country_code,
+  input.portalCountry,
+  input.portal_country,
+  input.code,
+  input.name,
+  ...getPortalCandidatesFromUrl(input.entryUrl || input.entry_url || input.portalUrl || input.portal_url),
+];
 
+const buildDetectedCountry = (detectedCountry, candidates, source) => {
   if (!detectedCountry) return null;
 
   return {
     ...detectedCountry,
-    source: 'entry_portal',
-    matchedCandidates: candidates,
+    source,
+    matchedCandidates: candidates.filter(Boolean),
   };
+};
+
+const detectCountryFromInput = (input, mappings, source = 'site_entry_api') => {
+  const candidates = getCountryInputCandidates(input).filter(Boolean);
+  const detectedCountry = findCountryByCandidates(candidates, mappings);
+
+  return buildDetectedCountry(detectedCountry, candidates, source);
+};
+
+const detectCountryFromRequest = (req, mappings) => {
+  const headerCountry = req.get('x-country-code') || req.get('x-portal-country');
+  const headerEntryUrl = req.get('x-entry-url') || req.get('x-portal-url');
+  const requestInput = {
+    ...req.body,
+    ...req.query,
+    country: req.body?.country || req.query.country || headerCountry,
+    countryCode: req.body?.countryCode || req.query.countryCode || req.body?.country_code || req.query.country_code,
+    portalCountry: req.body?.portalCountry || req.query.portalCountry || req.body?.portal_country || req.query.portal_country,
+    entryUrl: req.body?.entryUrl || req.query.entryUrl || req.body?.entry_url || req.query.entry_url || req.body?.portalUrl || req.query.portalUrl || headerEntryUrl,
+  };
+  const explicitCountry = detectCountryFromInput(requestInput, mappings, 'site_entry_api');
+
+  if (explicitCountry) return explicitCountry;
+
+  const urlCandidates = getRequestEntryUrls(req).flatMap(getPortalCandidatesFromUrl).filter(Boolean);
+  const detectedCountry = findCountryByCandidates(urlCandidates, mappings);
+
+  return buildDetectedCountry(detectedCountry, urlCandidates, 'entry_portal');
 };
 
 const requireCountryFromRequest = (req, mappings) => {
@@ -184,6 +219,7 @@ const requireCountryFromRequest = (req, mappings) => {
 module.exports = {
   DEFAULT_COUNTRY_PORTAL_MAPPINGS,
   PortalCountryDetectionError,
+  detectCountryFromInput,
   detectCountryFromRequest,
   parseCountryPortalMappings,
   requireCountryFromRequest,

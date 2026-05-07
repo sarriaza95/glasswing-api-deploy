@@ -27,7 +27,7 @@ DEFAULT_VOLUNTEER_ROLE_NAME=Volunteer
 
 ### Configuración opcional de países por portal
 
-El país **no se toma de Google** y **no se asigna por defecto**. Se intenta detectar antes de iniciar Google OAuth usando el portal de entrada: query params, URL de entrada, `Referer`, `Origin`, host/subdominio o path. Si no se detecta país, la API ya no bloquea la redirección a Google; el login OAuth continúa. Solo se requiere país al crear un usuario nuevo, porque `users.country_id` es obligatorio.
+El país **no se toma de Google** y **no se asigna por defecto**. El frontend debe informar a la API el país del sitio/portal desde donde entró el usuario, por ejemplo al cargar el sitio o antes de iniciar OAuth. La API también intenta detectarlo desde query params, URL de entrada, `Referer`, `Origin`, host/subdominio o path. Si no se detecta país, la API no bloquea la redirección a Google; el login OAuth continúa. Solo se requiere país al crear un usuario nuevo, porque `users.country_id` es obligatorio.
 
 Por defecto se incluyen países de Centroamérica:
 
@@ -63,6 +63,31 @@ http://localhost:3000/api/auth/google?entryUrl=https://nicaragua.example.com/reg
 http://localhost:3000/api/auth/google?entryUrl=https://example.com/nicaragua/registro
 ```
 
+### Flujo recomendado desde el frontend
+
+Como en local el frontend corre en `http://localhost:3001` y esa URL no trae país, el frontend debe enviar el país del sitio a la API antes de redirigir a Google. Ejemplo:
+
+```bash
+curl -X POST http://localhost:3000/api/auth/registration-country \
+  -H "Content-Type: application/json" \
+  -d '{"country":"SV"}'
+```
+
+Desde JavaScript, usa `credentials: 'include'` para que la sesión donde se guarda el país llegue también al callback de Google:
+
+```js
+await fetch('http://localhost:3000/api/auth/registration-country', {
+  method: 'POST',
+  credentials: 'include',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ country: 'SV' }),
+});
+
+window.location.href = 'http://localhost:3000/auth/google';
+```
+
+También puedes enviar `countryCode`, `country_code`, `portalCountry`, `entryUrl`, o headers como `X-Country-Code` / `X-Entry-Url`.
+
 ## Instalación y ejecución
 
 ```bash
@@ -77,6 +102,9 @@ Servidor por defecto en `http://localhost:3000`.
 - `GET /health`
 - `GET /api/auth/google`
 - `GET /api/auth/google/config`
+- `POST /api/auth/registration-country`
+- `GET /api/auth/registration-country`
+- `DELETE /api/auth/registration-country`
 - `GET /api/auth/google/callback`
 - `GET /api/auth/me`
 - `GET /api/auth/logout`
@@ -102,7 +130,7 @@ Si Google muestra `Error 400: redirect_uri_mismatch`, revisa que el valor `callb
 
 Después de un login exitoso con Google, la API guarda o actualiza al usuario en la tabla `users`. Durante ese proceso:
 
-- Intenta detectar el país desde el portal de entrada **antes** de redirigir a Google.
+- Recibe el país del sitio mediante `POST /api/auth/registration-country`, query params o headers antes de redirigir a Google.
 - Guarda el país detectado en sesión para usarlo al crear la cuenta durante el callback OAuth.
 - Busca o crea el rol configurado en `DEFAULT_VOLUNTEER_ROLE_NAME`.
 - Busca o crea el país detectado desde el portal.
@@ -110,7 +138,7 @@ Después de un login exitoso con Google, la API guarda o actualiza al usuario en
 - Para usuarios existentes, actualiza datos de Google y `last_login_at`, pero **no sobrescribe `country_id` ni `role_id`**, para permitir overrides desde el panel admin.
 - Escribe en consola `Google SSO user assigned` con el usuario, rol y país finalmente asignados.
 
-Si no se detecta país desde el portal de entrada, la redirección a Google no se bloquea. Si el usuario ya existe, puede iniciar sesión y se respeta el país guardado. Si el usuario es nuevo, la creación falla con `PORTAL_COUNTRY_NOT_FOUND` porque `users.country_id` es obligatorio y no se asigna ningún país por defecto; en ese caso inicia el login con `country=SV`, `country=NI`, etc., o con un `entryUrl` que contenga el país.
+Si no se detecta país desde el sitio, la redirección a Google no se bloquea. Si el usuario ya existe, puede iniciar sesión y se respeta el país guardado. Si el usuario es nuevo, la creación falla con `PORTAL_COUNTRY_NOT_FOUND` porque `users.country_id` es obligatorio y no se asigna ningún país por defecto; en ese caso guarda primero el país con `POST /api/auth/registration-country` o inicia el login con `country=SV`, `country=NI`, etc.
 
 ## Endpoints CRUD (todas las tablas)
 
