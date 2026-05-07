@@ -79,28 +79,26 @@ const findExistingUser = async (connection, googleUser) => {
   return users[0] || null;
 };
 
-const upsertGoogleUser = async (connection, googleUser, role, country) => {
-  const existingUser = await findExistingUser(connection, googleUser);
+const updateExistingGoogleUser = async (connection, googleUser, existingUser) => {
+  await connection.execute(
+    `UPDATE users
+     SET google_id = ?, email = ?, first_name = ?, last_name = ?, profile_image_url = ?, status = 'active', last_login_at = CURRENT_TIMESTAMP
+     WHERE id = ?`,
+    [
+      googleUser.googleId,
+      googleUser.email,
+      googleUser.firstName,
+      googleUser.lastName,
+      googleUser.profileImageUrl,
+      existingUser.id,
+    ]
+  );
 
-  if (existingUser) {
-    await connection.execute(
-      `UPDATE users
-       SET google_id = ?, email = ?, first_name = ?, last_name = ?, profile_image_url = ?, status = 'active', last_login_at = CURRENT_TIMESTAMP
-       WHERE id = ?`,
-      [
-        googleUser.googleId,
-        googleUser.email,
-        googleUser.firstName,
-        googleUser.lastName,
-        googleUser.profileImageUrl,
-        existingUser.id,
-      ]
-    );
+  const [users] = await connection.execute('SELECT * FROM users WHERE id = ? LIMIT 1', [existingUser.id]);
+  return users[0];
+};
 
-    const [users] = await connection.execute('SELECT * FROM users WHERE id = ? LIMIT 1', [existingUser.id]);
-    return users[0];
-  }
-
+const createGoogleUser = async (connection, googleUser, role, country) => {
   const [result] = await connection.execute(
     `INSERT INTO users (google_id, email, first_name, last_name, profile_image_url, role_id, country_id, status, last_login_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, 'active', CURRENT_TIMESTAMP)`,
@@ -119,6 +117,17 @@ const upsertGoogleUser = async (connection, googleUser, role, country) => {
   return users[0];
 };
 
+const buildMissingCountryError = () => {
+  const error = new Error('No se pudo crear el usuario porque no se detectó país desde el portal de entrada');
+  error.code = 'PORTAL_COUNTRY_NOT_FOUND';
+  error.statusCode = 422;
+  error.details = {
+    requiredAction:
+      'Para usuarios nuevos, inicia el login desde un portal configurado o envía country/entryUrl al endpoint /api/auth/google. Ejemplo local: /auth/google?country=SV.',
+  };
+  return error;
+};
+
 const persistGoogleUser = async (profile, registrationCountry) => {
   const googleUser = mapGoogleProfile(profile);
 
@@ -126,24 +135,26 @@ const persistGoogleUser = async (profile, registrationCountry) => {
     throw new Error('Google no devolvió un email para el usuario autenticado');
   }
 
-  if (!registrationCountry?.code || !registrationCountry?.name) {
-    const error = new Error('No se pudo asignar país porque no se detectó un país desde el portal de entrada');
-    error.code = 'PORTAL_COUNTRY_NOT_FOUND';
-    error.statusCode = 422;
-    error.details = {
-      requiredAction: 'Inicia el login desde un portal configurado o envía country/entryUrl al endpoint /api/auth/google.',
-    };
-    throw error;
-  }
-
   const connection = await pool.getConnection();
 
   try {
     await connection.beginTransaction();
 
-    const role = await getOrCreateVolunteerRole(connection);
-    const portalAssignedCountry = await getOrCreateCountry(connection, registrationCountry);
-    const user = await upsertGoogleUser(connection, googleUser, role, portalAssignedCountry);
+    const existingUser = await findExistingUser(connection, googleUser);
+    let user;
+
+    if (existingUser) {
+      user = await updateExistingGoogleUser(connection, googleUser, existingUser);
+    } else {
+      if (!registrationCountry?.code || !registrationCountry?.name) {
+        throw buildMissingCountryError();
+      }
+
+      const role = await getOrCreateVolunteerRole(connection);
+      const portalAssignedCountry = await getOrCreateCountry(connection, registrationCountry);
+      user = await createGoogleUser(connection, googleUser, role, portalAssignedCountry);
+    }
+
     const assignedRole = await getUserRole(connection, user.role_id);
     const assignedCountry = await getUserCountry(connection, user.country_id);
 
@@ -168,7 +179,7 @@ const persistGoogleUser = async (profile, registrationCountry) => {
         code: assignedCountry?.code,
         name: assignedCountry?.name,
         source:
-          assignedCountry?.code === registrationCountry.code
+          assignedCountry?.code === registrationCountry?.code
             ? registrationCountry.source
             : 'existing_user_or_admin_override',
       },
