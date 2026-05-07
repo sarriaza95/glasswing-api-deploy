@@ -1,42 +1,65 @@
 # glasswing-api-deploy
 
-API en Express.js con autenticación SSO de Google y CRUD para las tablas del esquema MySQL.
+API en Express.js con autenticación SSO de Google, persistencia en MySQL y endpoints CRUD genéricos para las tablas de la plataforma de voluntariado.
 
-## Requisitos
+## Variables de entorno
 
-- Node.js 18+
-- MySQL 8+
-- Proyecto OAuth de Google con credenciales web
+Copia `.env.example` a `.env` y completa tus credenciales:
 
-## Configuración
-
-1. Copia variables de entorno:
-
-```bash
-cp .env.example .env
+```env
+PORT=3000
+CLIENT_URL=http://localhost:5173
+API_BASE_URL=http://localhost:3000
+SESSION_SECRET=replace-with-a-long-random-secret
+GOOGLE_CLIENT_ID=your-google-client-id
+GOOGLE_CLIENT_SECRET=your-google-client-secret
+GOOGLE_CALLBACK_URL=http://localhost:3000/api/auth/google/callback
+FRONTEND_SUCCESS_URL=http://localhost:5173/auth/success
+FRONTEND_AUTH_ERROR_URL=http://localhost:5173/auth/error
+DB_HOST=localhost
+DB_PORT=3306
+DB_USER=root
+DB_PASSWORD=
+DB_NAME=volunteer_platform
+DB_POOL_SIZE=10
+DEFAULT_VOLUNTEER_ROLE_NAME=Volunteer
 ```
 
-2. Configura OAuth de Google:
+### Configuración opcional de países por portal
 
-- `GOOGLE_CLIENT_ID`
-- `GOOGLE_CLIENT_SECRET`
-- `GOOGLE_CALLBACK_URL` (debe coincidir con el redirect URI configurado en Google)
-- `SESSION_SECRET`
+El país **no se toma de Google** y **no se asigna por defecto**. Se detecta antes de iniciar Google OAuth usando el portal de entrada: query params, URL de entrada, `Referer`, `Origin`, host/subdominio o path.
 
-3. Configura conexión MySQL:
+Por defecto se incluyen países de Centroamérica:
 
-- `DB_HOST`
-- `DB_PORT`
-- `DB_USER`
-- `DB_PASSWORD`
-- `DB_NAME`
+- `SV` / El Salvador
+- `NI` / Nicaragua
+- `GT` / Guatemala
+- `HN` / Honduras
+- `CR` / Costa Rica
+- `PA` / Panamá
+- `BZ` / Belize
 
-4. Configura asignación automática con Google:
+Puedes reemplazar o ampliar esos mapeos con `COUNTRY_PORTAL_MAPPINGS` como JSON:
 
-- `DEFAULT_VOLUNTEER_ROLE_NAME` (por defecto `Volunteer`)
-- `GOOGLE_PEOPLE_API_ENABLED=false` por defecto para evitar el bloqueo de Google por app no verificada.
-- Con `false`, el país se toma del `locale` devuelto por el perfil OAuth de Google, por ejemplo `es-NI`.
-- Solo cambia `GOOGLE_PEOPLE_API_ENABLED=true` cuando la app esté verificada o cuando uses usuarios de prueba autorizados en Google Cloud, porque solicita el scope sensible `https://www.googleapis.com/auth/user.addresses.read`.
+```env
+COUNTRY_PORTAL_MAPPINGS=[{"code":"SV","name":"El Salvador","region":"Central America","aliases":["sv","el-salvador","elsalvador","salvador"]},{"code":"NI","name":"Nicaragua","region":"Central America","aliases":["ni","nicaragua"]}]
+```
+
+Cada `alias` se compara contra partes del host, subdominio, path y query string. Por ejemplo, todas estas entradas pueden asignar El Salvador sin pedir dato manual al usuario:
+
+```text
+http://localhost:3000/api/auth/google?country=SV
+http://localhost:3000/api/auth/google?entryUrl=https://el-salvador.example.com/registro
+http://localhost:3000/api/auth/google?entryUrl=https://example.com/el-salvador/registro
+```
+
+Para Nicaragua:
+
+```text
+http://localhost:3000/api/auth/google?country=NI
+http://localhost:3000/api/auth/google?entryUrl=https://nicaragua.example.com/registro
+http://localhost:3000/api/auth/google?entryUrl=https://example.com/nicaragua/registro
+```
 
 ## Instalación y ejecución
 
@@ -57,7 +80,6 @@ Servidor por defecto en `http://localhost:3000`.
 - `GET /api/auth/logout`
 - `GET /api/auth/failure`
 
-
 ### Configuración correcta para Google OAuth local
 
 El `GOOGLE_CALLBACK_URL` debe coincidir exactamente con uno de los **URIs de redireccionamiento autorizados** configurados en Google Cloud. Si el backend se mantiene en el puerto `3000`, no uses el callback con puerto `4000`; registra este URI en Google Cloud:
@@ -66,25 +88,7 @@ El `GOOGLE_CALLBACK_URL` debe coincidir exactamente con uno de los **URIs de red
 http://localhost:3000/api/auth/google/callback
 ```
 
-Y usa estas variables:
-
-```env
-PORT=3000
-CLIENT_URL=http://localhost:5173
-API_BASE_URL=http://localhost:3000
-GOOGLE_CALLBACK_URL=http://localhost:3000/api/auth/google/callback
-GOOGLE_PEOPLE_API_ENABLED=false
-FRONTEND_SUCCESS_URL=http://localhost:5173/auth/success
-FRONTEND_AUTH_ERROR_URL=http://localhost:5173/auth/error
-```
-
-Para iniciar el login, abre:
-
-```text
-http://localhost:3000/api/auth/google
-```
-
-Para diagnosticar qué callback está enviando la API a Google, abre:
+Para diagnosticar qué callback, scopes y mapeos de país usa la API, abre:
 
 ```text
 http://localhost:3000/api/auth/google/config
@@ -96,16 +100,15 @@ Si Google muestra `Error 400: redirect_uri_mismatch`, revisa que el valor `callb
 
 Después de un login exitoso con Google, la API guarda o actualiza al usuario en la tabla `users`. Durante ese proceso:
 
-- Lee el país desde la información de Google usando el `locale` del perfil OAuth. Si `GOOGLE_PEOPLE_API_ENABLED=true`, también puede consultar Google People API.
+- Detecta el país desde el portal de entrada **antes** de redirigir a Google.
+- Guarda el país detectado en sesión para usarlo al crear la cuenta durante el callback OAuth.
 - Busca o crea el rol configurado en `DEFAULT_VOLUNTEER_ROLE_NAME`.
-- Busca o crea el país devuelto por Google, por ejemplo `NI` / `Nicaragua`.
-- Asigna al usuario el rol de voluntario y el país devuelto por Google, sin valores de país por defecto.
-- Actualiza `last_login_at`.
+- Busca o crea el país detectado desde el portal.
+- Crea usuarios nuevos con rol voluntario y país detectado.
+- Para usuarios existentes, actualiza datos de Google y `last_login_at`, pero **no sobrescribe `country_id` ni `role_id`**, para permitir overrides desde el panel admin.
 - Escribe en consola `Google SSO user assigned` con el usuario, rol y país finalmente asignados.
 
-Si Google no devuelve país o código ISO de país, el login falla porque `users.country_id` es obligatorio y no se asigna ningún país por defecto. En ese caso el backend redirige a `FRONTEND_AUTH_ERROR_URL` con `code`, `message` y `details` para que el frontend pueda mostrar una explicación clara.
-
-Si activas Google People API mientras la pantalla OAuth sigue en modo Testing, agrega el correo que prueba el login en Google Cloud > OAuth consent screen > Test users; si no, Google puede mostrar `Error 403: access_denied` por app no verificada. Habilitar la API no basta: también necesitas usuario de prueba o verificación de app cuando pides scopes sensibles.
+Si no se detecta país desde el portal de entrada, el login falla con `PORTAL_COUNTRY_NOT_FOUND` porque `users.country_id` es obligatorio y no se asigna ningún país por defecto.
 
 ## Endpoints CRUD (todas las tablas)
 

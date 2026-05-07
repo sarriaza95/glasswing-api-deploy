@@ -1,6 +1,5 @@
 const pool = require('../config/db');
 const env = require('../config/env');
-const { getCountryFromGoogle } = require('./googleProfileService');
 
 const buildNameParts = (profile) => {
   const emailPrefix = profile.emails?.[0]?.value?.split('@')[0] || 'google-user';
@@ -43,20 +42,20 @@ const getOrCreateVolunteerRole = async (connection) => {
   return roles[0];
 };
 
-const getOrCreateGoogleCountry = async (connection, googleCountry) => {
+const getOrCreateCountry = async (connection, registrationCountry) => {
   const [existingCountries] = await connection.execute('SELECT * FROM countries WHERE code = ? LIMIT 1', [
-    googleCountry.code,
+    registrationCountry.code,
   ]);
 
   if (existingCountries.length) return existingCountries[0];
 
   await connection.execute(
     'INSERT IGNORE INTO countries (code, name, region, status) VALUES (?, ?, ?, ?)',
-    [googleCountry.code, googleCountry.name, googleCountry.region || null, 'active']
+    [registrationCountry.code, registrationCountry.name, registrationCountry.region || null, 'active']
   );
 
   const [countries] = await connection.execute('SELECT * FROM countries WHERE code = ? LIMIT 1', [
-    googleCountry.code,
+    registrationCountry.code,
   ]);
   return countries[0];
 };
@@ -86,7 +85,7 @@ const upsertGoogleUser = async (connection, googleUser, role, country) => {
   if (existingUser) {
     await connection.execute(
       `UPDATE users
-       SET google_id = ?, email = ?, first_name = ?, last_name = ?, profile_image_url = ?, role_id = ?, country_id = ?, status = 'active', last_login_at = CURRENT_TIMESTAMP
+       SET google_id = ?, email = ?, first_name = ?, last_name = ?, profile_image_url = ?, status = 'active', last_login_at = CURRENT_TIMESTAMP
        WHERE id = ?`,
       [
         googleUser.googleId,
@@ -94,8 +93,6 @@ const upsertGoogleUser = async (connection, googleUser, role, country) => {
         googleUser.firstName,
         googleUser.lastName,
         googleUser.profileImageUrl,
-        role.id,
-        country.id,
         existingUser.id,
       ]
     );
@@ -122,14 +119,22 @@ const upsertGoogleUser = async (connection, googleUser, role, country) => {
   return users[0];
 };
 
-const persistGoogleUser = async (profile, accessToken) => {
+const persistGoogleUser = async (profile, registrationCountry) => {
   const googleUser = mapGoogleProfile(profile);
 
   if (!googleUser.email) {
     throw new Error('Google no devolvió un email para el usuario autenticado');
   }
 
-  const googleCountry = await getCountryFromGoogle(accessToken, profile);
+  if (!registrationCountry?.code || !registrationCountry?.name) {
+    const error = new Error('No se pudo asignar país porque no se detectó un país desde el portal de entrada');
+    error.code = 'PORTAL_COUNTRY_NOT_FOUND';
+    error.statusCode = 422;
+    error.details = {
+      requiredAction: 'Inicia el login desde un portal configurado o envía country/entryUrl al endpoint /api/auth/google.',
+    };
+    throw error;
+  }
 
   const connection = await pool.getConnection();
 
@@ -137,8 +142,8 @@ const persistGoogleUser = async (profile, accessToken) => {
     await connection.beginTransaction();
 
     const role = await getOrCreateVolunteerRole(connection);
-    const googleAssignedCountry = await getOrCreateGoogleCountry(connection, googleCountry);
-    const user = await upsertGoogleUser(connection, googleUser, role, googleAssignedCountry);
+    const portalAssignedCountry = await getOrCreateCountry(connection, registrationCountry);
+    const user = await upsertGoogleUser(connection, googleUser, role, portalAssignedCountry);
     const assignedRole = await getUserRole(connection, user.role_id);
     const assignedCountry = await getUserCountry(connection, user.country_id);
 
@@ -162,7 +167,10 @@ const persistGoogleUser = async (profile, accessToken) => {
         id: assignedCountry?.id,
         code: assignedCountry?.code,
         name: assignedCountry?.name,
-        source: googleCountry.source,
+        source:
+          assignedCountry?.code === registrationCountry.code
+            ? registrationCountry.source
+            : 'existing_user_or_admin_override',
       },
     };
 

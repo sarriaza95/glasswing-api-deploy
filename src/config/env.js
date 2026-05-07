@@ -8,12 +8,10 @@ const googleCallbackUrl =
 const frontendSuccessUrl = process.env.FRONTEND_SUCCESS_URL || `${clientUrl}/auth/success`;
 const frontendErrorUrl = process.env.FRONTEND_AUTH_ERROR_URL || `${clientUrl}/auth/error`;
 
-const googlePeopleApiEnabled = process.env.GOOGLE_PEOPLE_API_ENABLED === 'true';
-const googleOAuthScopes = ['profile', 'email'];
+const { parseCountryPortalMappings } = require('../services/countryPortalService');
 
-if (googlePeopleApiEnabled) {
-  googleOAuthScopes.push('https://www.googleapis.com/auth/user.addresses.read');
-}
+const googleOAuthScopes = ['profile', 'email'];
+const countryPortalMappings = parseCountryPortalMappings(process.env.COUNTRY_PORTAL_MAPPINGS);
 
 module.exports = {
   port,
@@ -25,7 +23,7 @@ module.exports = {
   sessionSecret: process.env.SESSION_SECRET || 'dev-secret',
   googleClientId: process.env.GOOGLE_CLIENT_ID,
   googleClientSecret: process.env.GOOGLE_CLIENT_SECRET,
-  googlePeopleApiEnabled,
   googleOAuthScopes,
+  countryPortalMappings,
   defaultVolunteerRoleName: process.env.DEFAULT_VOLUNTEER_ROLE_NAME || 'Volunteer',
 };
