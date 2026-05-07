@@ -2,6 +2,7 @@ const express = require('express');
 const passport = require('../config/passport');
 const env = require('../config/env');
 const { detectCountryFromInput, detectCountryFromRequest } = require('../services/countryPortalService');
+const { detectCountryFromRequestIp, getClientIp } = require('../services/geoLocationService');
 
 const router = express.Router();
 
@@ -56,6 +57,19 @@ router.get('/registration-country', (req, res) => {
   res.json({
     country: req.session.registrationCountry || null,
     supportedCountries: getSupportedCountries(),
+  });
+});
+
+router.get('/ip-country', (req, res) => {
+  const clientIp = getClientIp(req);
+  const ipDetectedCountry = detectCountryFromRequestIp(req);
+
+  res.json({
+    clientIp,
+    detectedCountry: ipDetectedCountry || null,
+    message: ipDetectedCountry
+      ? 'País detectado desde la IP del usuario'
+      : 'No se pudo detectar país desde la IP (probablemente es localhost)',
   });
 });
 

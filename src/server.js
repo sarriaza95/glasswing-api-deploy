@@ -18,7 +18,7 @@ app.use(
 );
 
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', env.clientUrl);
+  res.header('Access-Control-Allow-Origin', process.env.CLIENT_URL);
   res.header('Access-Control-Allow-Credentials', 'true');
   res.header('Access-Control-Allow-Headers', 'Content-Type, X-Country-Code, X-Portal-Country, X-Entry-Url, X-Portal-Url');
   res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');

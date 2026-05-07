@@ -26,4 +26,5 @@ module.exports = {
   googleOAuthScopes,
   countryPortalMappings,
   defaultVolunteerRoleName: process.env.DEFAULT_VOLUNTEER_ROLE_NAME || 'Volunteer',
+  defaultCountryForLocalDev: process.env.DEFAULT_COUNTRY_FOR_LOCAL_DEV || null,
 };
