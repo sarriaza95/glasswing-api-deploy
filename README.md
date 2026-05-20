@@ -112,6 +112,10 @@ Servidor por defecto en `http://localhost:3000`.
 - `GET /api/volunteer-onboarding/progress`
 - `PUT /api/volunteer-onboarding/progress`
 - `GET /api/trainings`
+- `GET /api/trainings/:id`
+- `POST /api/trainings`
+- `PUT /api/trainings/:id`
+- `DELETE /api/trainings/:id`
 
 ### Configuración correcta para Google OAuth local
 
@@ -227,3 +231,6 @@ Catálogos para frontend:
 
 - `GET /api/sessions` devuelve sesiones y agrega `stage` calculado (`introduccion` o `trainings`).
 - `GET /api/trainings` devuelve sesiones de capacitaciones (`session_type = specialized`) con `stage = introduccion` para compatibilidad de filtro actual del frontend.
+
+
+> Nota: `trainings` es un endpoint alias para CRUD de capacitaciones y persiste en la tabla `sessions` con `session_type = specialized`.

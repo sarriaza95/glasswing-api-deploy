@@ -63,6 +63,73 @@ app.get('/api/trainings', async (_req, res, next) => {
   }
 });
 
+app.get('/api/trainings/:id', async (req, res, next) => {
+  try {
+    const [rows] = await pool.query("SELECT *, 'introduccion' AS stage FROM sessions WHERE id = ? AND session_type = 'specialized' LIMIT 1", [req.params.id]);
+    if (!rows.length) return res.status(404).json({ message: 'Registro no encontrado' });
+    return res.json(rows[0]);
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post('/api/trainings', async (req, res, next) => {
+  try {
+    const payload = { ...req.body };
+    const allowedFields = [
+      'program_id', 'coordinator_id', 'coach_id', 'title', 'description', 'delivery_mode', 'scheduled_date',
+      'start_time', 'end_time', 'location', 'virtual_link', 'max_capacity', 'registration_link', 'status',
+      'materials_url', 'recording_url'
+    ];
+    const fields = allowedFields.filter((field) => payload[field] !== undefined);
+    if (!fields.length) return res.status(400).json({ message: 'Payload vacío' });
+
+    const columns = ['session_type', ...fields].map((field) => `\`${field}\``).join(', ');
+    const placeholders = ['?', ...fields.map(() => '?')].join(', ');
+    const values = ['specialized', ...fields.map((field) => payload[field])];
+
+    const [result] = await pool.query(`INSERT INTO sessions (${columns}) VALUES (${placeholders})`, values);
+    const [rows] = await pool.query("SELECT *, 'introduccion' AS stage FROM sessions WHERE id = ? LIMIT 1", [result.insertId]);
+    return res.status(201).json(rows[0]);
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.put('/api/trainings/:id', async (req, res, next) => {
+  try {
+    const payload = { ...req.body };
+    const allowedFields = [
+      'program_id', 'coordinator_id', 'coach_id', 'title', 'description', 'delivery_mode', 'scheduled_date',
+      'start_time', 'end_time', 'location', 'virtual_link', 'max_capacity', 'registration_link', 'status',
+      'materials_url', 'recording_url'
+    ];
+    const fields = allowedFields.filter((field) => payload[field] !== undefined);
+    if (!fields.length) return res.status(400).json({ message: 'Payload vacío' });
+
+    const setClause = ['`session_type` = ?'].concat(fields.map((field) => `\`${field}\` = ?`)).join(', ');
+    const values = ['specialized', ...fields.map((field) => payload[field]), req.params.id];
+
+    const [result] = await pool.query(`UPDATE sessions SET ${setClause} WHERE id = ? AND session_type = 'specialized'`, values);
+    if (result.affectedRows === 0) return res.status(404).json({ message: 'Registro no encontrado' });
+
+    const [rows] = await pool.query("SELECT *, 'introduccion' AS stage FROM sessions WHERE id = ? LIMIT 1", [req.params.id]);
+    return res.json(rows[0]);
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.delete('/api/trainings/:id', async (req, res, next) => {
+  try {
+    const [result] = await pool.query("DELETE FROM sessions WHERE id = ? AND session_type = 'specialized'", [req.params.id]);
+    if (result.affectedRows === 0) return res.status(404).json({ message: 'Registro no encontrado' });
+    return res.status(204).send();
+  } catch (error) {
+    return next(error);
+  }
+});
+
 app.get('/api/sessions', async (_req, res, next) => {
   try {
     const [rows] = await pool.query("SELECT *, CASE WHEN session_type IN ('general', 'follow-up') THEN 'introduccion' ELSE 'trainings' END AS stage FROM sessions ORDER BY scheduled_date DESC LIMIT 500");
