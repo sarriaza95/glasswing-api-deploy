@@ -118,38 +118,17 @@ const createGoogleUser = async (connection, googleUser, role, country) => {
 };
 
 const buildMissingCountryError = () => {
-  const error = new Error('No se pudo crear el usuario porque no se detectó país de la sesión ni de la ubicación del usuario');
-  error.code = 'COUNTRY_NOT_DETECTED';
+  const error = new Error('No se pudo crear el usuario porque no se detectó país desde el portal de entrada');
+  error.code = 'PORTAL_COUNTRY_NOT_FOUND';
   error.statusCode = 422;
   error.details = {
     requiredAction:
-      'Para usuarios nuevos, inicia el login desde un portal configurado o envía country/entryUrl al endpoint /api/auth/google. Ejemplo: /auth/google?country=SV o /auth/registration-country con POST.',
+      'Para usuarios nuevos, inicia el login desde un portal configurado o envía country/entryUrl al endpoint /api/auth/google. Ejemplo local: /auth/google?country=SV.',
   };
   return error;
 };
 
-/**
- * Determine which country to use for new user
- * Priority: portal country > IP-detected country > error
- */
-const resolveCountryForNewUser = async (connection, portalCountry, ipDetectedCountry) => {
-  const countryToUse = portalCountry || ipDetectedCountry;
-
-  if (!countryToUse?.code || !countryToUse?.name) {
-    throw buildMissingCountryError();
-  }
-
-  // Verify country exists or create it
-  const country = await getOrCreateCountry(connection, countryToUse);
-  
-  return {
-    country,
-    source: portalCountry?.source || ipDetectedCountry?.source,
-    priority: portalCountry ? 'portal' : 'ip_geolocation',
-  };
-};
-
-const persistGoogleUser = async (profile, registrationCountry, ipDetectedCountry) => {
+const persistGoogleUser = async (profile, registrationCountry) => {
   const googleUser = mapGoogleProfile(profile);
 
   if (!googleUser.email) {
@@ -167,19 +146,13 @@ const persistGoogleUser = async (profile, registrationCountry, ipDetectedCountry
     if (existingUser) {
       user = await updateExistingGoogleUser(connection, googleUser, existingUser);
     } else {
-      const countryResolution = await resolveCountryForNewUser(connection, registrationCountry, ipDetectedCountry);
-      
-      const role = await getOrCreateVolunteerRole(connection);
-      user = await createGoogleUser(connection, googleUser, role, countryResolution.country);
+      if (!registrationCountry?.code || !registrationCountry?.name) {
+        throw buildMissingCountryError();
+      }
 
-      console.log('Country resolved for new user', {
-        priority: countryResolution.priority,
-        source: countryResolution.source,
-        country: {
-          id: countryResolution.country.id,
-          code: countryResolution.country.code,
-        },
-      });
+      const role = await getOrCreateVolunteerRole(connection);
+      const portalAssignedCountry = await getOrCreateCountry(connection, registrationCountry);
+      user = await createGoogleUser(connection, googleUser, role, portalAssignedCountry);
     }
 
     const assignedRole = await getUserRole(connection, user.role_id);
@@ -205,11 +178,14 @@ const persistGoogleUser = async (profile, registrationCountry, ipDetectedCountry
         id: assignedCountry?.id,
         code: assignedCountry?.code,
         name: assignedCountry?.name,
-        source: registrationCountry?.source || ipDetectedCountry?.source || 'unknown',
+        source:
+          assignedCountry?.code === registrationCountry?.code
+            ? registrationCountry.source
+            : 'existing_user_or_admin_override',
       },
     };
 
-    console.log('Google SSO user assigned with role and country', {
+    console.log('Google SSO user assigned', {
       user: persistedUser,
       role: persistedUser.role,
       country: persistedUser.country,

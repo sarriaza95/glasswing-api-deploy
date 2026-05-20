@@ -109,6 +109,9 @@ Servidor por defecto en `http://localhost:3000`.
 - `GET /api/auth/me`
 - `GET /api/auth/logout`
 - `GET /api/auth/failure`
+- `GET /api/volunteer-onboarding/progress`
+- `PUT /api/volunteer-onboarding/progress`
+- `GET /api/trainings`
 
 ### Configuración correcta para Google OAuth local
 
@@ -181,3 +184,46 @@ curl -X POST http://localhost:3000/api/roles \
 ## Nota
 
 El CRUD es genérico por tabla y usa el campo `id` como primary key para rutas `/:id`, alineado con tu script SQL.
+
+
+## Progreso de onboarding (frontend integration)
+
+La API ahora expone progreso de onboarding por usuario autenticado en sesión:
+
+- `GET /api/volunteer-onboarding/progress`
+- `PUT /api/volunteer-onboarding/progress`
+
+Payload de `PUT` soportado:
+
+```json
+{
+  "current_step": "trainings",
+  "full_name": "Nombre Apellido",
+  "email": "correo@dominio.com",
+  "phone": "555-555",
+  "country_id": 1,
+  "video_watched": true,
+  "selected_charlas": [12, 14],
+  "selected_project": 3
+}
+```
+
+Validaciones implementadas:
+
+- `current_step` debe ser uno de `personal-info | intro-video | charlas | project-selection | trainings`.
+- `selected_charlas` debe ser arreglo de IDs válidos de sesiones introductorias (`session_type in ('general', 'follow-up')`).
+- `selected_project` debe existir y estar activo en `programs`.
+- No se permite saltar pasos del onboarding.
+- Para llegar al paso `trainings`, se valida evidencia de asistencia real:
+  - `charlas_completed = true` si hay asistencia `present` a sesiones introductorias.
+  - `trainings_completed = true` si hay asistencia `present` a sesiones especializadas.
+
+Persistencia:
+
+- Se usa tabla `volunteer_onboarding_progress` (se crea automáticamente si no existe).
+- Upsert por `user_id` autenticado.
+
+Catálogos para frontend:
+
+- `GET /api/sessions` devuelve sesiones y agrega `stage` calculado (`introduccion` o `trainings`).
+- `GET /api/trainings` devuelve sesiones de capacitaciones (`session_type = specialized`) con `stage = introduccion` para compatibilidad de filtro actual del frontend.

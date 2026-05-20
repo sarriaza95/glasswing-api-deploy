@@ -1,24 +1,17 @@
-require('dotenv').config();
-
 const express = require('express');
 const session = require('express-session');
-const cors = require('cors');
+const env = require('./config/env');
 const passport = require('./config/passport');
 const authRouter = require('./routes/auth');
 const crudRouter = require('./routes/crud');
+const onboardingRouter = require('./routes/volunteerOnboarding');
+const pool = require('./config/db');
 
 const app = express();
-const port = process.env.PORT || 3000;
-
-app.use(
-  cors({
-    origin: process.env.CLIENT_URL,
-    credentials: true,
-  })
-);
+const port = env.port;
 
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', process.env.CLIENT_URL);
+  res.header('Access-Control-Allow-Origin', env.clientUrl);
   res.header('Access-Control-Allow-Credentials', 'true');
   res.header('Access-Control-Allow-Headers', 'Content-Type, X-Country-Code, X-Portal-Country, X-Entry-Url, X-Portal-Url');
   res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
@@ -34,7 +27,7 @@ app.use(express.json());
 
 app.use(
   session({
-    secret: process.env.SESSION_SECRET,
+    secret: env.sessionSecret,
     resave: false,
     saveUninitialized: false,
     cookie: {
@@ -59,9 +52,30 @@ app.get('/health', (_req, res) => {
 app.use('/api/auth', authRouter);
 app.use('/auth', authRouter);
 
+app.use('/api/volunteer-onboarding', onboardingRouter);
+
+app.get('/api/trainings', async (_req, res, next) => {
+  try {
+    const [rows] = await pool.query("SELECT *, 'introduccion' AS stage FROM sessions WHERE session_type = 'specialized' ORDER BY scheduled_date DESC LIMIT 500");
+    return res.json(rows);
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.get('/api/sessions', async (_req, res, next) => {
+  try {
+    const [rows] = await pool.query("SELECT *, CASE WHEN session_type IN ('general', 'follow-up') THEN 'introduccion' ELSE 'trainings' END AS stage FROM sessions ORDER BY scheduled_date DESC LIMIT 500");
+    return res.json(rows);
+  } catch (error) {
+    return next(error);
+  }
+});
+
 app.use('/api', crudRouter);
 
 app.use((err, _req, res, _next) => {
+  // eslint-disable-next-line no-console
   console.error(err);
 
   if (err && err.code) {
@@ -72,14 +86,11 @@ app.use((err, _req, res, _next) => {
     });
   }
 
-  return res.status(500).json({
-    message: 'Error interno del servidor',
-  });
+  return res.status(500).json({ message: 'Error interno del servidor' });
 });
 
 app.listen(port, () => {
+  // eslint-disable-next-line no-console
   console.log(`Server listening on http://localhost:${port}`);
-  console.log(
-    `Google OAuth callback URL: ${process.env.GOOGLE_CALLBACK_URL}`
-  );
+  console.log(`Google OAuth callback URL: ${env.googleCallbackUrl}`);
 });
