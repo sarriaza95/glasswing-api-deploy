@@ -85,8 +85,8 @@ const validateStepTransition = (currentStep, nextStep, completion) => {
   if (nextIndex === -1) return 'current_step inválido';
   if (nextIndex <= currentIndex + 1) return null;
 
-  if (nextStep === 'trainings' && (!completion.charlasCompleted || !completion.trainingsCompleted)) {
-    return 'No puedes avanzar a etapa 2 sin charlas y capacitaciones completadas';
+  if (['project-selection', 'trainings'].includes(nextStep) && !completion.charlasCompleted) {
+    return 'No puedes avanzar a etapa 2 sin charlas de introduccion completadas';
   }
 
   return 'No puedes saltar pasos del onboarding';

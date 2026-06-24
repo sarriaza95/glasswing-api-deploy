@@ -117,15 +117,25 @@ const createGoogleUser = async (connection, googleUser, role, country) => {
   return users[0];
 };
 
-const buildMissingCountryError = () => {
-  const error = new Error('No se pudo crear el usuario porque no se detectó país desde el portal de entrada');
-  error.code = 'PORTAL_COUNTRY_NOT_FOUND';
-  error.statusCode = 422;
-  error.details = {
-    requiredAction:
-      'Para usuarios nuevos, inicia el login desde un portal configurado o envía country/entryUrl al endpoint /api/auth/google. Ejemplo local: /auth/google?country=SV.',
+const getDefaultRegistrationCountry = () => {
+  const defaultCode = env.defaultRegistrationCountryCode;
+  const defaultCountry = env.countryPortalMappings.find((country) => country.code === defaultCode);
+
+  if (defaultCountry) {
+    return {
+      ...defaultCountry,
+      source: 'default_registration_country',
+      matchedCandidates: [],
+    };
+  }
+
+  return {
+    code: 'SV',
+    name: 'El Salvador',
+    region: 'Central America',
+    source: 'default_registration_country',
+    matchedCandidates: [],
   };
-  return error;
 };
 
 const persistGoogleUser = async (profile, registrationCountry) => {
@@ -146,13 +156,13 @@ const persistGoogleUser = async (profile, registrationCountry) => {
     if (existingUser) {
       user = await updateExistingGoogleUser(connection, googleUser, existingUser);
     } else {
-      if (!registrationCountry?.code || !registrationCountry?.name) {
-        throw buildMissingCountryError();
-      }
-
       const role = await getOrCreateVolunteerRole(connection);
-      const portalAssignedCountry = await getOrCreateCountry(connection, registrationCountry);
+      const registrationAssignedCountry = registrationCountry?.code && registrationCountry?.name
+        ? registrationCountry
+        : getDefaultRegistrationCountry();
+      const portalAssignedCountry = await getOrCreateCountry(connection, registrationAssignedCountry);
       user = await createGoogleUser(connection, googleUser, role, portalAssignedCountry);
+      registrationCountry = registrationAssignedCountry;
     }
 
     const assignedRole = await getUserRole(connection, user.role_id);

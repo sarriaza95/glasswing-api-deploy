@@ -25,6 +25,18 @@ const getSupportedCountries = () =>
     aliases,
   }));
 
+const getDefaultRegistrationCountry = () => {
+  const country = env.countryPortalMappings.find(
+    (mapping) => mapping.code === env.defaultRegistrationCountryCode
+  );
+
+  return {
+    ...(country || { code: 'SV', name: 'El Salvador', region: 'Central America', aliases: ['sv'] }),
+    source: 'default_registration_country',
+    matchedCandidates: [],
+  };
+};
+
 const buildCountryNotFoundResponse = (input) => ({
   message: 'No se pudo detectar país desde la información enviada por el sitio',
   code: 'PORTAL_COUNTRY_NOT_FOUND',
@@ -71,6 +83,7 @@ router.get('/google/config', (_req, res) => {
     googleCloudAuthorizedRedirectUri: env.googleCallbackUrl,
     googleOAuthScopes: env.googleOAuthScopes,
     countryPortalMappings: env.countryPortalMappings,
+    defaultRegistrationCountryCode: env.defaultRegistrationCountryCode,
     registrationCountryApi: {
       set: `${env.apiBaseUrl}/api/auth/registration-country`,
       get: `${env.apiBaseUrl}/api/auth/registration-country`,
@@ -91,12 +104,14 @@ router.get('/google', (req, res, next) => {
   if (registrationCountry) {
     req.session.registrationCountry = registrationCountry;
   } else if (!req.session.registrationCountry) {
-    console.warn('Entry site country was not available before Google OAuth', {
+    req.session.registrationCountry = getDefaultRegistrationCountry();
+    console.warn('Entry site country was not available before Google OAuth; using default country', {
       hint:
-        'El login continuará. Si el usuario es nuevo, primero guarda el país con POST /api/auth/registration-country o inicia con ?country=SV.',
+        `El login continuara usando ${req.session.registrationCountry.name} por defecto. Puedes enviar ?country=SV u otro pais configurado para cambiarlo.`,
       referer: req.get('referer') || null,
       origin: req.get('origin') || null,
       currentUrl: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
+      defaultCountry: req.session.registrationCountry,
     });
   }
 

@@ -25,5 +25,6 @@ module.exports = {
   googleClientSecret: process.env.GOOGLE_CLIENT_SECRET,
   googleOAuthScopes,
   countryPortalMappings,
+  defaultRegistrationCountryCode: process.env.DEFAULT_REGISTRATION_COUNTRY_CODE || 'SV',
   defaultVolunteerRoleName: process.env.DEFAULT_VOLUNTEER_ROLE_NAME || 'Volunteer',
 };
