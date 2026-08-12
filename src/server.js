@@ -8,6 +8,7 @@ const authRouter = require('./routes/auth');
 const crudRouter = require('./routes/crud');
 const onboardingRouter = require('./routes/volunteerOnboarding');
 const pool = require('./config/db');
+const { apiRoleGate, requireCoachProgramBodyAccess, requireCoachSessionAccess } = require('./middleware/rbac');
 
 const app = express();
 const port = env.port;
@@ -152,6 +153,45 @@ const ensureAuthenticated = (req, res, next) => {
   return next();
 };
 
+const getUserRoleName = async (userId) => {
+  const [rows] = await pool.query(
+    `SELECT r.name AS role_name
+     FROM users u
+     LEFT JOIN roles r ON r.id = u.role_id
+     WHERE u.id = ?
+     LIMIT 1`,
+    [userId]
+  );
+  return normalizeText(rows[0]?.role_name || '');
+};
+
+const ensureStaffCanManageVolunteers = async (req, res, next) => {
+  try {
+    if (!req.isAuthenticated?.() || !req.user?.id) {
+      return res.status(401).json({ message: 'No autenticado' });
+    }
+    const roleName = await getUserRoleName(req.user.id);
+    if (!['admin', 'administrator', 'administrador', 'coach', 'entrenador'].includes(roleName)) {
+      return res.status(403).json({ message: 'Solo administradores y coaches pueden gestionar como voluntario' });
+    }
+    return next();
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const getVolunteerForRequest = async (req, createIfMissing = false) => {
+  const managedVolunteerId = req.session?.managedVolunteerId;
+  if (managedVolunteerId) {
+    const roleName = await getUserRoleName(req.user.id);
+    if (['admin', 'administrator', 'administrador', 'coach', 'entrenador'].includes(roleName)) {
+      const [rows] = await pool.query('SELECT * FROM volunteers WHERE id = ? LIMIT 1', [managedVolunteerId]);
+      if (rows.length) return rows[0];
+    }
+  }
+  return getVolunteerForUser(req.user.id, createIfMissing);
+};
+
 const normalizeAttendanceStatus = (value) => {
   const normalized = normalizeText(value || 'present');
   const statusMap = {
@@ -277,6 +317,118 @@ const normalizeReminderStatus = (value) => {
   return statusMap[normalized] || null;
 };
 
+const normalizeVolunteerActionType = (value) => {
+  const normalized = normalizeText(value || 'onboarding');
+  const actionMap = {
+    onboarding: 'onboarding',
+    alta: 'onboarding',
+    inscripcion: 'onboarding',
+    graduation: 'graduation',
+    graduacion: 'graduation',
+  };
+
+  return actionMap[normalized] || null;
+};
+
+const normalizeVolunteerFormType = (value) => {
+  const normalized = normalizeText(value || 'adult');
+  const typeMap = {
+    adult: 'adult',
+    adulto: 'adult',
+    mayor: 'adult',
+    minor: 'minor',
+    menor: 'minor',
+  };
+
+  return typeMap[normalized] || null;
+};
+
+const normalizeVolunteerFormStatus = (value) => {
+  const normalized = normalizeText(value || '');
+  const statusMap = {
+    requested: 'requested',
+    solicitado: 'requested',
+    'in-progress': 'in_progress',
+    in_progress: 'in_progress',
+    progreso: 'in_progress',
+    submitted: 'submitted',
+    enviado: 'submitted',
+    approved: 'approved',
+    aprobado: 'approved',
+    rejected: 'rejected',
+    rechazado: 'rejected',
+    expired: 'expired',
+    vencido: 'expired',
+  };
+
+  return statusMap[normalized] || null;
+};
+
+const computeVolunteerLifecycleEligibility = async (volunteerId, programId = null) => {
+  const programParams = [volunteerId];
+  const programWhere = ['vp.volunteer_id = ?', "vp.status IN ('enrolled', 'active')"];
+  if (programId) {
+    programWhere.push('vp.program_id = ?');
+    programParams.push(programId);
+  }
+
+  const [programRows] = await pool.query(
+    `SELECT vp.program_id, p.name AS program_name
+     FROM volunteer_programs vp
+     LEFT JOIN programs p ON p.id = vp.program_id
+     WHERE ${programWhere.join(' AND ')}`,
+    programParams
+  );
+  const programIds = programRows.map((row) => row.program_id).filter(Boolean);
+
+  const accessConditions = [
+    `EXISTS (
+      SELECT 1
+      FROM session_attendance sa_registered
+      WHERE sa_registered.session_id = s.id AND sa_registered.volunteer_id = ?
+    )`,
+  ];
+  const accessParams = [volunteerId];
+
+  if (programIds.length) {
+    accessConditions.push(`s.program_id IN (${programIds.map(() => '?').join(', ')})`);
+    accessParams.push(...programIds);
+  }
+
+  const [sessionRows] = await pool.query(
+    `SELECT
+      s.id,
+      s.title,
+      s.program_id,
+      s.session_type,
+      CASE WHEN s.session_type = 'specialized' THEN 'grupo' ELSE 'introduccion' END AS stage,
+      s.scheduled_date,
+      s.start_time,
+      sa.id AS attendance_id,
+      sa.status AS attendance_status
+     FROM sessions s
+     LEFT JOIN session_attendance sa
+       ON sa.session_id = s.id AND sa.volunteer_id = ?
+     WHERE s.status <> 'cancelled'
+       AND (s.status = 'completed' OR TIMESTAMP(s.scheduled_date, COALESCE(s.end_time, s.start_time, '23:59:59')) <= NOW())
+       AND (${accessConditions.join(' OR ')})
+     ORDER BY s.scheduled_date DESC, s.start_time DESC`,
+    [volunteerId, ...accessParams]
+  );
+
+  const missingAttendance = sessionRows.filter((row) => row.attendance_status !== 'present');
+
+  return {
+    volunteer_id: volunteerId,
+    program_id: programId,
+    enrolled_programs: programRows,
+    expected_sessions: sessionRows.length,
+    present_sessions: sessionRows.length - missingAttendance.length,
+    missing_sessions: missingAttendance,
+    attendance_complete: missingAttendance.length === 0,
+  };
+};
+
 const getVolunteerDocumentRows = async (whereClause = '', params = []) => {
   const [rows] = await pool.query(
     `SELECT
@@ -346,6 +498,37 @@ app.use('/auth', authRouter);
 
 app.use('/api/volunteer-onboarding', onboardingRouter);
 
+
+app.post('/api/volunteer-impersonation/:volunteerId/start', ensureStaffCanManageVolunteers, async (req, res, next) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT v.id, u.first_name, u.last_name, u.email
+       FROM volunteers v
+       LEFT JOIN users u ON u.id = v.user_id
+       WHERE v.id = ?
+       LIMIT 1`,
+      [req.params.volunteerId]
+    );
+    if (!rows.length) return res.status(404).json({ message: 'Voluntario no encontrado' });
+    req.session.managedVolunteerId = rows[0].id;
+    return req.session.save((sessionError) => {
+      if (sessionError) return next(sessionError);
+      return res.json({ volunteer: rows[0], managed: true });
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.delete('/api/volunteer-impersonation/stop', ensureAuthenticated, (req, res, next) => {
+  delete req.session.managedVolunteerId;
+  return req.session.save((sessionError) => {
+    if (sessionError) return next(sessionError);
+    return res.json({ managed: false });
+  });
+});
+app.use('/api', apiRoleGate);
+
 app.get('/api/trainings', async (_req, res, next) => {
   try {
     const [rows] = await pool.query("SELECT *, 'grupo' AS stage FROM sessions WHERE session_type = 'specialized' ORDER BY scheduled_date DESC LIMIT 500");
@@ -365,7 +548,7 @@ app.get('/api/trainings/:id', async (req, res, next) => {
   }
 });
 
-app.post('/api/trainings', async (req, res, next) => {
+app.post('/api/trainings', ...requireCoachProgramBodyAccess, async (req, res, next) => {
   try {
     const { payload, invalidFields, invalidEnums } = normalizeTrainingPayload(req.body, req.user);
     if (invalidFields.length) {
@@ -393,7 +576,7 @@ app.post('/api/trainings', async (req, res, next) => {
   }
 });
 
-app.put('/api/trainings/:id', async (req, res, next) => {
+app.put('/api/trainings/:id', ...requireCoachSessionAccess, async (req, res, next) => {
   try {
     const { payload, invalidFields, invalidEnums } = normalizeTrainingPayload(req.body, req.user);
     if (invalidFields.length) {
@@ -419,7 +602,7 @@ app.put('/api/trainings/:id', async (req, res, next) => {
   }
 });
 
-app.delete('/api/trainings/:id', async (req, res, next) => {
+app.delete('/api/trainings/:id', ...requireCoachSessionAccess, async (req, res, next) => {
   try {
     const [result] = await pool.query("DELETE FROM sessions WHERE id = ? AND session_type = 'specialized'", [req.params.id]);
     if (result.affectedRows === 0) return res.status(404).json({ message: 'Registro no encontrado' });
@@ -452,7 +635,7 @@ app.get('/api/sessions', async (req, res, next) => {
 
 app.get('/api/volunteer-attendance/me', ensureAuthenticated, async (req, res, next) => {
   try {
-    const volunteer = await getVolunteerForUser(req.user.id, true);
+    const volunteer = await getVolunteerForRequest(req, true);
     if (!volunteer) return res.status(404).json({ message: 'Perfil de voluntario no encontrado' });
 
     const [rows] = await pool.query(
@@ -510,7 +693,7 @@ app.post('/api/volunteer-attendance/register', ensureAuthenticated, async (req, 
       return res.status(400).json({ message: 'attendance_method invalido' });
     }
 
-    const volunteer = await getVolunteerForUser(req.user.id, true);
+    const volunteer = await getVolunteerForRequest(req, true);
     if (!volunteer) return res.status(404).json({ message: 'Perfil de voluntario no encontrado' });
 
     const [sessions] = await pool.query("SELECT id FROM sessions WHERE id = ? AND status <> 'cancelled' LIMIT 1", [
@@ -591,7 +774,7 @@ app.get('/api/attendance-summary', async (_req, res, next) => {
   }
 });
 
-app.get('/api/attendance-summary/:sessionId', async (req, res, next) => {
+app.get('/api/attendance-summary/:sessionId', ...requireCoachSessionAccess, async (req, res, next) => {
   try {
     const [sessionRows] = await pool.query(
       `SELECT *, CASE WHEN session_type = 'specialized' THEN 'grupo' ELSE 'introduccion' END AS stage
@@ -624,7 +807,7 @@ app.get('/api/attendance-summary/:sessionId', async (req, res, next) => {
   }
 });
 
-app.post('/api/attendance/mark', async (req, res, next) => {
+app.post('/api/attendance/mark', ...requireCoachSessionAccess, async (req, res, next) => {
   try {
     const { session_id: sessionId, volunteer_id: volunteerId } = req.body || {};
     const status = normalizeAttendanceStatus(req.body?.status);
@@ -762,7 +945,7 @@ app.put('/api/volunteer_group_members/:id', async (req, res, next) => {
 
 app.get('/api/volunteer-documents/me', ensureAuthenticated, async (req, res, next) => {
   try {
-    const volunteer = await getVolunteerForUser(req.user.id, true);
+    const volunteer = await getVolunteerForRequest(req, true);
     if (!volunteer) return res.status(404).json({ message: 'Perfil de voluntario no encontrado' });
 
     const documents = await getVolunteerDocumentRows('WHERE vd.volunteer_id = ?', [volunteer.id]);
@@ -774,7 +957,7 @@ app.get('/api/volunteer-documents/me', ensureAuthenticated, async (req, res, nex
 
 app.post('/api/volunteer-documents/upload', ensureAuthenticated, async (req, res, next) => {
   try {
-    const volunteer = await getVolunteerForUser(req.user.id, true);
+    const volunteer = await getVolunteerForRequest(req, true);
     if (!volunteer) return res.status(404).json({ message: 'Perfil de voluntario no encontrado' });
 
     const documentType = sanitizeFilePart(req.body?.document_type || 'general');
@@ -890,6 +1073,282 @@ app.put('/api/volunteer-documents/:id/review', async (req, res, next) => {
 
     const documents = await getVolunteerDocumentRows('WHERE vd.id = ?', [req.params.id]);
     return res.json(documents[0]);
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.get('/api/volunteer-form-requests/me', ensureAuthenticated, async (req, res, next) => {
+  try {
+    const volunteer = await getVolunteerForRequest(req, true);
+    if (!volunteer) return res.status(404).json({ message: 'Perfil de voluntario no encontrado' });
+
+    await pool.query(
+      `UPDATE volunteer_form_requests
+       SET status = 'expired'
+       WHERE volunteer_id = ?
+         AND status IN ('requested', 'in_progress', 'rejected')
+         AND due_date < CURDATE()`,
+      [volunteer.id]
+    );
+
+    const [requests] = await pool.query(
+      `SELECT vfr.*, p.name AS program_name
+       FROM volunteer_form_requests vfr
+       LEFT JOIN programs p ON p.id = vfr.program_id
+       WHERE vfr.volunteer_id = ?
+       ORDER BY FIELD(vfr.status, 'requested', 'in_progress', 'rejected', 'submitted', 'approved', 'expired'), vfr.due_date ASC, vfr.created_at DESC`,
+      [volunteer.id]
+    );
+    const eligibility = await computeVolunteerLifecycleEligibility(volunteer.id);
+
+    return res.json({ volunteer, requests, eligibility });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.get('/api/volunteer-form-requests/review', async (_req, res, next) => {
+  try {
+    await pool.query(
+      `UPDATE volunteer_form_requests
+       SET status = 'expired'
+       WHERE status IN ('requested', 'in_progress', 'rejected')
+         AND due_date < CURDATE()`
+    );
+
+    const [volunteers] = await pool.query(
+      `SELECT
+        v.id AS volunteer_id,
+        v.status AS volunteer_status,
+        v.user_id,
+        u.first_name,
+        u.last_name,
+        u.email,
+        u.phone,
+        c.name AS country_name,
+        latest.id AS request_id,
+        latest.action_type,
+        latest.form_type,
+        latest.status AS request_status,
+        latest.due_date,
+        latest.submitted_at,
+        latest.reviewed_at,
+        latest.review_notes,
+        latest.form_data,
+        p.name AS program_name
+       FROM volunteers v
+       INNER JOIN users u ON u.id = v.user_id
+       LEFT JOIN countries c ON c.id = u.country_id
+       LEFT JOIN (
+         SELECT vfr.*
+         FROM volunteer_form_requests vfr
+         INNER JOIN (
+           SELECT volunteer_id, MAX(id) AS id
+           FROM volunteer_form_requests
+           GROUP BY volunteer_id
+         ) latest_request ON latest_request.id = vfr.id
+       ) latest ON latest.volunteer_id = v.id
+       LEFT JOIN programs p ON p.id = latest.program_id
+       ORDER BY latest.created_at DESC, u.first_name, u.last_name
+       LIMIT 500`
+    );
+
+    const rows = await Promise.all(
+      volunteers.map(async (row) => ({
+        ...row,
+        eligibility: await computeVolunteerLifecycleEligibility(row.volunteer_id, row.program_id || null),
+      }))
+    );
+
+    return res.json(rows);
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post('/api/volunteer-form-requests', async (req, res, next) => {
+  try {
+    const volunteerId = req.body?.volunteer_id;
+    const programId = req.body?.program_id || null;
+    const actionType = normalizeVolunteerActionType(req.body?.action_type);
+    const formType = normalizeVolunteerFormType(req.body?.form_type);
+    const dueDate = normalizeDateValue(req.body?.due_date);
+
+    if (!volunteerId) return res.status(400).json({ message: 'volunteer_id es requerido' });
+    if (!actionType) return res.status(400).json({ message: 'action_type invalido' });
+    if (!formType) return res.status(400).json({ message: 'form_type invalido' });
+    if (!dueDate) return res.status(400).json({ message: 'due_date es requerido' });
+
+    const [volunteers] = await pool.query('SELECT id FROM volunteers WHERE id = ? LIMIT 1', [volunteerId]);
+    if (!volunteers.length) return res.status(404).json({ message: 'Voluntario no encontrado' });
+
+    if (programId) {
+      const [programs] = await pool.query('SELECT id FROM programs WHERE id = ? LIMIT 1', [programId]);
+      if (!programs.length) return res.status(404).json({ message: 'Programa no encontrado' });
+    }
+
+    const [result] = await pool.query(
+      `INSERT INTO volunteer_form_requests
+       (volunteer_id, program_id, requested_by, action_type, form_type, status, due_date)
+       VALUES (?, ?, ?, ?, ?, 'requested', ?)`,
+      [volunteerId, programId, req.user?.id || null, actionType, formType, dueDate]
+    );
+
+    const [rows] = await pool.query('SELECT * FROM volunteer_form_requests WHERE id = ? LIMIT 1', [result.insertId]);
+    return res.status(201).json(rows[0]);
+  } catch (error) {
+    return next(error);
+  }
+});
+app.put('/api/volunteer-form-requests/:id/resend', async (req, res, next) => {
+  try {
+    const dueDate = normalizeDateValue(req.body?.due_date);
+    if (!dueDate) return res.status(400).json({ message: 'due_date es requerido' });
+
+    const [requests] = await pool.query('SELECT * FROM volunteer_form_requests WHERE id = ? LIMIT 1', [req.params.id]);
+    if (!requests.length) return res.status(404).json({ message: 'Solicitud no encontrada' });
+
+    const request = requests[0];
+    if (request.status !== 'expired') {
+      return res.status(400).json({ message: 'Solo se pueden reenviar solicitudes vencidas' });
+    }
+
+    await pool.query(
+      `UPDATE volunteer_form_requests
+       SET status = 'requested',
+           due_date = ?,
+           requested_by = ?,
+           submitted_at = NULL,
+           reviewed_by = NULL,
+           reviewed_at = NULL,
+           review_notes = NULL,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+      [dueDate, req.user?.id || null, req.params.id]
+    );
+
+    const [rows] = await pool.query('SELECT * FROM volunteer_form_requests WHERE id = ? LIMIT 1', [req.params.id]);
+    return res.json(rows[0]);
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.put('/api/volunteer-form-requests/:id/submit', ensureAuthenticated, async (req, res, next) => {
+  try {
+    const volunteer = await getVolunteerForRequest(req, true);
+    if (!volunteer) return res.status(404).json({ message: 'Perfil de voluntario no encontrado' });
+
+    const formData = req.body?.form_data;
+    if (!formData || typeof formData !== 'object' || Array.isArray(formData)) {
+      return res.status(400).json({ message: 'form_data es requerido' });
+    }
+
+    const [requests] = await pool.query(
+      `SELECT *
+       FROM volunteer_form_requests
+       WHERE id = ? AND volunteer_id = ?
+       LIMIT 1`,
+      [req.params.id, volunteer.id]
+    );
+    if (!requests.length) return res.status(404).json({ message: 'Solicitud no encontrada' });
+
+    const current = requests[0];
+    if (current.status === 'approved') {
+      return res.status(400).json({ message: 'Este formulario ya fue aprobado' });
+    }
+    if (current.due_date && String(current.due_date).slice(0, 10) < new Date().toISOString().slice(0, 10)) {
+      await pool.query("UPDATE volunteer_form_requests SET status = 'expired' WHERE id = ?", [req.params.id]);
+      return res.status(400).json({ message: 'La fecha limite para completar el formulario ya vencio' });
+    }
+
+    await pool.query(
+      `UPDATE volunteer_form_requests
+       SET form_data = ?,
+           status = 'submitted',
+           submitted_at = CURRENT_TIMESTAMP,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+      [JSON.stringify(formData), req.params.id]
+    );
+
+    const [rows] = await pool.query('SELECT * FROM volunteer_form_requests WHERE id = ? LIMIT 1', [req.params.id]);
+    return res.json(rows[0]);
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.put('/api/volunteer-form-requests/:id/review', async (req, res, next) => {
+  try {
+    const status = normalizeVolunteerFormStatus(req.body?.status);
+    const notes = String(req.body?.review_notes || req.body?.notes || '').trim();
+
+    if (!['approved', 'rejected'].includes(status)) {
+      return res.status(400).json({ message: 'status debe ser approved o rejected' });
+    }
+    if (status === 'rejected' && !notes) {
+      return res.status(400).json({ message: 'La nota es requerida para rechazar el formulario' });
+    }
+
+    const [requests] = await pool.query('SELECT * FROM volunteer_form_requests WHERE id = ? LIMIT 1', [req.params.id]);
+    if (!requests.length) return res.status(404).json({ message: 'Solicitud no encontrada' });
+
+    const request = requests[0];
+    if (status === 'approved') {
+      if (!request.form_data) {
+        return res.status(400).json({ message: 'El voluntario debe completar el formulario antes de aprobar' });
+      }
+
+      const eligibility = await computeVolunteerLifecycleEligibility(request.volunteer_id, request.program_id || null);
+      if (!eligibility.attendance_complete) {
+        return res.status(400).json({
+          message: 'No se puede aprobar porque el voluntario tiene asistencias pendientes',
+          eligibility,
+        });
+      }
+    }
+
+    await pool.query(
+      `UPDATE volunteer_form_requests
+       SET status = ?,
+           reviewed_by = ?,
+           reviewed_at = CURRENT_TIMESTAMP,
+           review_notes = ?,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+      [status, req.user?.id || null, status === 'rejected' ? notes : notes || null, req.params.id]
+    );
+
+    if (status === 'approved') {
+      if (request.action_type === 'graduation') {
+        const params = [request.volunteer_id];
+        let where = 'volunteer_id = ?';
+        if (request.program_id) {
+          where += ' AND program_id = ?';
+          params.push(request.program_id);
+        }
+        await pool.query(
+          `UPDATE volunteer_programs
+           SET status = 'completed',
+               end_date = COALESCE(end_date, CURDATE()),
+               certification_date = COALESCE(certification_date, CURDATE()),
+               progress_percentage = 100,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE ${where}`,
+          params
+        );
+      } else {
+        await pool.query(
+          "UPDATE volunteers SET status = 'active', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+          [request.volunteer_id]
+        );
+      }
+    }
+
+    const [rows] = await pool.query('SELECT * FROM volunteer_form_requests WHERE id = ? LIMIT 1', [req.params.id]);
+    return res.json(rows[0]);
   } catch (error) {
     return next(error);
   }

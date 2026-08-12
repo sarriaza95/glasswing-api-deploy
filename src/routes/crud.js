@@ -113,6 +113,20 @@ const normalizeEnum = (table, field, value) => {
       ausencia: 'absence',
       inasistencia: 'absence',
     },
+    action_type: {
+      alta: 'onboarding',
+      onboarding: 'onboarding',
+      inscripcion: 'onboarding',
+      graduacion: 'graduation',
+      graduation: 'graduation',
+    },
+    form_type: {
+      adulto: 'adult',
+      adult: 'adult',
+      mayor: 'adult',
+      menor: 'minor',
+      minor: 'minor',
+    },
     session_type: {
       general: 'general',
       introduccion: 'general',
