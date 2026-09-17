@@ -5,6 +5,21 @@ const router = express.Router();
 
 const STEP_ORDER = ['personal-info', 'intro-video', 'charlas', 'project-selection', 'trainings'];
 
+const ONBOARDING_COLUMNS = {
+  date_of_birth: 'DATE NULL',
+  sex: 'VARCHAR(30) NULL',
+  first_time_volunteer: 'BOOLEAN NULL',
+  is_studying: 'BOOLEAN NULL',
+  study_center: 'VARCHAR(255) NULL',
+  needs_service_hours: 'BOOLEAN NULL',
+  availability: 'VARCHAR(50) NULL',
+  interest_area: 'VARCHAR(100) NULL',
+  previous_experience: 'VARCHAR(300) NULL',
+  referral_source: 'VARCHAR(150) NULL',
+  referral_source_other: 'VARCHAR(255) NULL',
+  completed_at: 'TIMESTAMP NULL',
+};
+
 const ensureAuthenticated = (req, res, next) => {
   if (!req.isAuthenticated?.() || !req.user?.id) {
     return res.status(401).json({ message: 'No autenticado' });
@@ -23,6 +38,18 @@ const ensureProgressTable = async () => {
       email VARCHAR(255) NULL,
       phone VARCHAR(50) NULL,
       country_id INT NULL,
+      date_of_birth DATE NULL,
+      sex VARCHAR(30) NULL,
+      first_time_volunteer BOOLEAN NULL,
+      is_studying BOOLEAN NULL,
+      study_center VARCHAR(255) NULL,
+      needs_service_hours BOOLEAN NULL,
+      availability VARCHAR(50) NULL,
+      interest_area VARCHAR(100) NULL,
+      previous_experience VARCHAR(300) NULL,
+      referral_source VARCHAR(150) NULL,
+      referral_source_other VARCHAR(255) NULL,
+      completed_at TIMESTAMP NULL,
       video_watched BOOLEAN NOT NULL DEFAULT false,
       selected_charlas JSON NULL,
       selected_project INT NULL,
@@ -36,6 +63,15 @@ const ensureProgressTable = async () => {
       CONSTRAINT fk_onboarding_progress_project FOREIGN KEY (selected_project) REFERENCES programs(id) ON DELETE SET NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
   `);
+
+  const [columns] = await pool.query('SHOW COLUMNS FROM volunteer_onboarding_progress');
+  const existingColumns = new Set(columns.map((column) => column.Field));
+
+  for (const [columnName, definition] of Object.entries(ONBOARDING_COLUMNS)) {
+    if (!existingColumns.has(columnName)) {
+      await pool.query(`ALTER TABLE volunteer_onboarding_progress ADD COLUMN ${columnName} ${definition}`);
+    }
+  }
 };
 
 const getCompletionFlags = async (userId) => {
@@ -68,6 +104,18 @@ const hydrateResponse = async (userId, row) => {
     email: row.email,
     phone: row.phone,
     country_id: row.country_id,
+    date_of_birth: row.date_of_birth,
+    sex: row.sex,
+    first_time_volunteer: row.first_time_volunteer === null ? null : Boolean(row.first_time_volunteer),
+    is_studying: row.is_studying === null ? null : Boolean(row.is_studying),
+    study_center: row.study_center,
+    needs_service_hours: row.needs_service_hours === null ? null : Boolean(row.needs_service_hours),
+    availability: row.availability,
+    interest_area: row.interest_area,
+    previous_experience: row.previous_experience,
+    referral_source: row.referral_source,
+    referral_source_other: row.referral_source_other,
+    completed: Boolean(row.completed_at),
     video_watched: Boolean(row.video_watched),
     selected_charlas: row.selected_charlas || [],
     selected_project: row.selected_project,
@@ -77,6 +125,68 @@ const hydrateResponse = async (userId, row) => {
 };
 
 const validateStep = (step) => STEP_ORDER.includes(step);
+
+const nullableBoolean = (value) => {
+  if (value === null || value === undefined || value === '') return null;
+  if ([true, 1, '1', 'true', 'yes'].includes(value)) return true;
+  if ([false, 0, '0', 'false', 'no'].includes(value)) return false;
+  return null;
+};
+
+const validateProfilePayload = (payload) => {
+  const requiredTextFields = [
+    'full_name',
+    'email',
+    'phone',
+    'country_id',
+    'date_of_birth',
+    'sex',
+    'availability',
+    'interest_area',
+    'previous_experience',
+    'referral_source',
+  ];
+  const missingField = requiredTextFields.find((field) => !String(payload[field] ?? '').trim());
+  if (missingField) return `${missingField} es requerido`;
+
+  if (nullableBoolean(payload.first_time_volunteer) === null) {
+    return 'first_time_volunteer es requerido';
+  }
+  if (nullableBoolean(payload.is_studying) === null) {
+    return 'is_studying es requerido';
+  }
+
+  const allowedValues = {
+    sex: ['female', 'male'],
+    availability: ['morning', 'afternoon', 'saturday', 'any'],
+    interest_area: ['community_schools', 'girls_club', 'youth'],
+    referral_source: [
+      'social_media',
+      'former_volunteer',
+      'university_fair',
+      'former_participant',
+      'employer',
+      'school_coordination',
+      'other',
+    ],
+  };
+
+  for (const [field, values] of Object.entries(allowedValues)) {
+    if (payload[field] && !values.includes(payload[field])) return `${field} contiene una opción inválida`;
+  }
+
+  if (payload.date_of_birth && !/^\d{4}-\d{2}-\d{2}$/.test(payload.date_of_birth)) {
+    return 'date_of_birth debe usar el formato YYYY-MM-DD';
+  }
+  if (payload.previous_experience && String(payload.previous_experience).length > 300) {
+    return 'previous_experience no puede superar 300 caracteres';
+  }
+  if (payload.referral_source === 'other' && !String(payload.referral_source_other || '').trim()) {
+    return 'Debes especificar cómo te enteraste del voluntariado';
+  }
+
+  return null;
+};
 
 const validateStepTransition = (currentStep, nextStep, completion) => {
   const currentIndex = STEP_ORDER.indexOf(currentStep);
@@ -107,6 +217,18 @@ router.get('/progress', ensureAuthenticated, async (req, res, next) => {
         email: req.user.email || null,
         phone: null,
         country_id: req.user.country?.id || null,
+        date_of_birth: null,
+        sex: null,
+        first_time_volunteer: null,
+        is_studying: null,
+        study_center: null,
+        needs_service_hours: null,
+        availability: null,
+        interest_area: null,
+        previous_experience: null,
+        referral_source: null,
+        referral_source_other: null,
+        completed: false,
         video_watched: false,
         selected_charlas: [],
         selected_project: null,
@@ -138,6 +260,11 @@ router.put('/progress', ensureAuthenticated, async (req, res, next) => {
 
     if (payload.selected_charlas && !Array.isArray(payload.selected_charlas)) {
       return res.status(400).json({ message: 'selected_charlas debe ser un arreglo' });
+    }
+
+    const profileValidationError = validateProfilePayload(payload);
+    if (profileValidationError) {
+      return res.status(400).json({ message: profileValidationError });
     }
 
     const [existingRows] = await pool.query('SELECT * FROM volunteer_onboarding_progress WHERE user_id = ? LIMIT 1', [
@@ -175,6 +302,7 @@ router.put('/progress', ensureAuthenticated, async (req, res, next) => {
       }
     }
 
+    const isStudying = nullableBoolean(payload.is_studying);
     const upsertValues = [
       req.user.id,
       nextStep,
@@ -182,6 +310,17 @@ router.put('/progress', ensureAuthenticated, async (req, res, next) => {
       payload.email || null,
       payload.phone || null,
       payload.country_id || null,
+      payload.date_of_birth || null,
+      payload.sex || null,
+      nullableBoolean(payload.first_time_volunteer),
+      isStudying,
+      isStudying ? payload.study_center || null : null,
+      isStudying ? nullableBoolean(payload.needs_service_hours) : null,
+      payload.availability || null,
+      payload.interest_area || null,
+      payload.previous_experience ? String(payload.previous_experience).trim() : null,
+      payload.referral_source || null,
+      payload.referral_source === 'other' ? String(payload.referral_source_other || '').trim() || null : null,
       Boolean(payload.video_watched),
       JSON.stringify(payload.selected_charlas || []),
       payload.selected_project || null,
@@ -189,19 +328,40 @@ router.put('/progress', ensureAuthenticated, async (req, res, next) => {
 
     await pool.query(
       `INSERT INTO volunteer_onboarding_progress
-       (user_id, current_step, full_name, email, phone, country_id, video_watched, selected_charlas, selected_project)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       (user_id, current_step, full_name, email, phone, country_id, date_of_birth, sex,
+        first_time_volunteer, is_studying, study_center, needs_service_hours, availability,
+        interest_area, previous_experience, referral_source, referral_source_other,
+        video_watched, selected_charlas, selected_project)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON DUPLICATE KEY UPDATE
          current_step = VALUES(current_step),
          full_name = VALUES(full_name),
          email = VALUES(email),
          phone = VALUES(phone),
          country_id = VALUES(country_id),
+         date_of_birth = VALUES(date_of_birth),
+         sex = VALUES(sex),
+         first_time_volunteer = VALUES(first_time_volunteer),
+         is_studying = VALUES(is_studying),
+         study_center = VALUES(study_center),
+         needs_service_hours = VALUES(needs_service_hours),
+         availability = VALUES(availability),
+         interest_area = VALUES(interest_area),
+         previous_experience = VALUES(previous_experience),
+         referral_source = VALUES(referral_source),
+         referral_source_other = VALUES(referral_source_other),
          video_watched = VALUES(video_watched),
          selected_charlas = VALUES(selected_charlas),
          selected_project = VALUES(selected_project)`,
       upsertValues
     );
+
+    if (payload.completed === true && nextStep === 'trainings') {
+      await pool.query(
+        'UPDATE volunteer_onboarding_progress SET completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP) WHERE user_id = ?',
+        [req.user.id]
+      );
+    }
 
     const [rows] = await pool.query('SELECT * FROM volunteer_onboarding_progress WHERE user_id = ? LIMIT 1', [
       req.user.id,

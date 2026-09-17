@@ -70,6 +70,16 @@ const normalizeTimeValue = (value) => {
   return timeMatch ? timeMatch[0] : value;
 };
 
+const parseJsonField = (value) => {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+};
+
 const normalizeTrainingPayload = (body, user) => {
   const aliases = {
     programId: 'program_id',
@@ -214,6 +224,42 @@ const getVolunteerForUser = async (userId, createIfMissing = false) => {
   await pool.query('INSERT IGNORE INTO volunteers (user_id, status) VALUES (?, ?)', [userId, 'active']);
   const [created] = await pool.query('SELECT * FROM volunteers WHERE user_id = ? LIMIT 1', [userId]);
   return created[0] || null;
+};
+
+const getVolunteerFormProfile = async (volunteerId) => {
+  const [rows] = await pool.query(
+    `SELECT
+       v.id AS volunteer_id,
+       v.specialization,
+       v.education_level,
+       v.availability,
+       v.emergency_contact_name,
+       v.emergency_contact_phone,
+       v.preferences,
+       u.first_name,
+       u.last_name,
+       u.email,
+       u.phone,
+       u.country_id,
+       c.name AS country_name,
+       gc.code_country AS geo_country_code,
+       gc.name AS geo_country_name
+     FROM volunteers v
+     INNER JOIN users u ON u.id = v.user_id
+     LEFT JOIN countries c ON c.id = u.country_id
+     LEFT JOIN geo_countries gc ON LOWER(gc.name) = LOWER(c.name)
+     WHERE v.id = ?
+     LIMIT 1`,
+    [volunteerId]
+  );
+
+  const profile = rows[0] || null;
+  if (!profile) return null;
+
+  return {
+    ...profile,
+    preferences: parseJsonField(profile.preferences) || null,
+  };
 };
 
 const refreshSessionAttendanceCount = async (sessionId) => {
@@ -498,6 +544,131 @@ app.use('/auth', authRouter);
 
 app.use('/api/volunteer-onboarding', onboardingRouter);
 
+app.get('/api/geography/countries', ensureAuthenticated, async (_req, res, next) => {
+  try {
+    const [countries] = await pool.query(
+      `SELECT id, code_country, name, glasswing_office
+       FROM geo_countries
+       ORDER BY glasswing_office DESC, name ASC`
+    );
+    return res.json(countries);
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.get('/api/geography/states', ensureAuthenticated, async (req, res, next) => {
+  try {
+    const countryCode = String(req.query.country_code || '').trim();
+    const countryName = String(req.query.country_name || '').trim();
+
+    if (!countryCode && !countryName) {
+      return res.status(400).json({ message: 'country_code o country_name es requerido' });
+    }
+
+    const params = [];
+    const conditions = [];
+    if (countryCode) {
+      conditions.push('gs.fk_code_country = ?');
+      params.push(countryCode);
+    }
+    if (countryName) {
+      conditions.push('LOWER(gc.name) = LOWER(?)');
+      params.push(countryName);
+    }
+
+    const [states] = await pool.query(
+      `SELECT gs.id, gs.code_state, gs.name, gs.fk_code_country AS code_country
+       FROM geo_states gs
+       INNER JOIN geo_countries gc ON gc.code_country = gs.fk_code_country
+       WHERE ${conditions.join(' OR ')}
+       ORDER BY gs.name ASC`,
+      params
+    );
+    return res.json(states);
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.get('/api/geography/municipalities', ensureAuthenticated, async (req, res, next) => {
+  try {
+    const stateCode = String(req.query.state_code || '').trim();
+    if (!stateCode) return res.status(400).json({ message: 'state_code es requerido' });
+
+    const [municipalities] = await pool.query(
+      `SELECT id, code_municipality, name, fk_code_state AS code_state
+       FROM geo_municipalities
+       WHERE fk_code_state = ?
+       ORDER BY name ASC`,
+      [stateCode]
+    );
+    return res.json(municipalities);
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.get('/api/faqs/search', async (req, res, next) => {
+  try {
+    const query = String(req.query.q || '').trim();
+    const category = String(req.query.category || '').trim();
+    const countryId = req.query.country_id ? Number(req.query.country_id) : null;
+    const limit = Math.min(Math.max(Number(req.query.limit || 5), 1), 10);
+    const where = ['is_active = TRUE', 'deleted_at IS NULL'];
+    const params = [];
+
+    if (category) {
+      where.push('category = ?');
+      params.push(category);
+    }
+
+    if (countryId) {
+      where.push('(country_id IS NULL OR country_id = ?)');
+      params.push(countryId);
+    }
+
+    if (query) {
+      const likeQuery = `%${query}%`;
+      where.push('(question LIKE ? OR answer LIKE ?)');
+      params.push(likeQuery, likeQuery);
+    }
+
+    const [faqs] = await pool.query(
+      `SELECT id, question, answer, category, country_id, sort_order, is_featured
+       FROM faqs
+       WHERE ${where.join(' AND ')}
+       ORDER BY
+         CASE WHEN country_id IS NULL THEN 1 ELSE 0 END,
+         is_featured DESC,
+         sort_order ASC,
+         id ASC
+       LIMIT ?`,
+      [...params, limit]
+    );
+
+    if (query && faqs.length < limit) {
+      const [fallbackFaqs] = await pool.query(
+        `SELECT id, question, answer, category, country_id, sort_order, is_featured
+         FROM faqs
+         WHERE is_active = TRUE
+           AND deleted_at IS NULL
+           ${countryId ? 'AND (country_id IS NULL OR country_id = ?)' : ''}
+         ORDER BY is_featured DESC, sort_order ASC, id ASC
+         LIMIT ?`,
+        countryId ? [countryId, limit - faqs.length] : [limit - faqs.length]
+      );
+      const existingIds = new Set(faqs.map((faq) => Number(faq.id)));
+      fallbackFaqs.forEach((faq) => {
+        if (!existingIds.has(Number(faq.id))) faqs.push(faq);
+      });
+    }
+
+    return res.json({ query, faqs });
+  } catch (error) {
+    return next(error);
+  }
+});
 
 app.post('/api/volunteer-impersonation/:volunteerId/start', ensureStaffCanManageVolunteers, async (req, res, next) => {
   try {
@@ -1101,8 +1272,9 @@ app.get('/api/volunteer-form-requests/me', ensureAuthenticated, async (req, res,
       [volunteer.id]
     );
     const eligibility = await computeVolunteerLifecycleEligibility(volunteer.id);
+    const volunteerProfile = await getVolunteerFormProfile(volunteer.id);
 
-    return res.json({ volunteer, requests, eligibility });
+    return res.json({ volunteer, volunteer_profile: volunteerProfile, requests, eligibility });
   } catch (error) {
     return next(error);
   }
@@ -1128,6 +1300,7 @@ app.get('/api/volunteer-form-requests/review', async (_req, res, next) => {
         u.phone,
         c.name AS country_name,
         latest.id AS request_id,
+        latest.program_id,
         latest.action_type,
         latest.form_type,
         latest.status AS request_status,
@@ -1155,10 +1328,14 @@ app.get('/api/volunteer-form-requests/review', async (_req, res, next) => {
     );
 
     const rows = await Promise.all(
-      volunteers.map(async (row) => ({
-        ...row,
-        eligibility: await computeVolunteerLifecycleEligibility(row.volunteer_id, row.program_id || null),
-      }))
+      volunteers.map(async (row) => {
+        const volunteerProfile = await getVolunteerFormProfile(row.volunteer_id);
+        return {
+          ...row,
+          volunteer_profile: volunteerProfile,
+          eligibility: await computeVolunteerLifecycleEligibility(row.volunteer_id, row.program_id || null),
+        };
+      })
     );
 
     return res.json(rows);
