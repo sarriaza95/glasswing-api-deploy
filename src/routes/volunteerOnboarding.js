@@ -1,24 +1,16 @@
 const express = require('express');
 const pool = require('../config/db');
+const {
+  allIntroVideosWatched,
+  ensureProgressTable,
+  normalizeWatchedVideoIds,
+  nullableBoolean,
+  validateProfilePayload,
+} = require('../services/volunteerOnboardingService');
 
 const router = express.Router();
 
 const STEP_ORDER = ['personal-info', 'intro-video', 'charlas', 'project-selection', 'trainings'];
-
-const ONBOARDING_COLUMNS = {
-  date_of_birth: 'DATE NULL',
-  sex: 'VARCHAR(30) NULL',
-  first_time_volunteer: 'BOOLEAN NULL',
-  is_studying: 'BOOLEAN NULL',
-  study_center: 'VARCHAR(255) NULL',
-  needs_service_hours: 'BOOLEAN NULL',
-  availability: 'VARCHAR(50) NULL',
-  interest_area: 'VARCHAR(100) NULL',
-  previous_experience: 'VARCHAR(300) NULL',
-  referral_source: 'VARCHAR(150) NULL',
-  referral_source_other: 'VARCHAR(255) NULL',
-  completed_at: 'TIMESTAMP NULL',
-};
 
 const ensureAuthenticated = (req, res, next) => {
   if (!req.isAuthenticated?.() || !req.user?.id) {
@@ -26,52 +18,6 @@ const ensureAuthenticated = (req, res, next) => {
   }
 
   return next();
-};
-
-const ensureProgressTable = async () => {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS volunteer_onboarding_progress (
-      id INT PRIMARY KEY AUTO_INCREMENT,
-      user_id INT NOT NULL,
-      current_step VARCHAR(50) NOT NULL DEFAULT 'personal-info',
-      full_name VARCHAR(255) NULL,
-      email VARCHAR(255) NULL,
-      phone VARCHAR(50) NULL,
-      country_id INT NULL,
-      date_of_birth DATE NULL,
-      sex VARCHAR(30) NULL,
-      first_time_volunteer BOOLEAN NULL,
-      is_studying BOOLEAN NULL,
-      study_center VARCHAR(255) NULL,
-      needs_service_hours BOOLEAN NULL,
-      availability VARCHAR(50) NULL,
-      interest_area VARCHAR(100) NULL,
-      previous_experience VARCHAR(300) NULL,
-      referral_source VARCHAR(150) NULL,
-      referral_source_other VARCHAR(255) NULL,
-      completed_at TIMESTAMP NULL,
-      video_watched BOOLEAN NOT NULL DEFAULT false,
-      selected_charlas JSON NULL,
-      selected_project INT NULL,
-      charlas_completed BOOLEAN NOT NULL DEFAULT false,
-      trainings_completed BOOLEAN NOT NULL DEFAULT false,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY unique_user_progress (user_id),
-      CONSTRAINT fk_onboarding_progress_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-      CONSTRAINT fk_onboarding_progress_country FOREIGN KEY (country_id) REFERENCES countries(id) ON DELETE SET NULL,
-      CONSTRAINT fk_onboarding_progress_project FOREIGN KEY (selected_project) REFERENCES programs(id) ON DELETE SET NULL
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-  `);
-
-  const [columns] = await pool.query('SHOW COLUMNS FROM volunteer_onboarding_progress');
-  const existingColumns = new Set(columns.map((column) => column.Field));
-
-  for (const [columnName, definition] of Object.entries(ONBOARDING_COLUMNS)) {
-    if (!existingColumns.has(columnName)) {
-      await pool.query(`ALTER TABLE volunteer_onboarding_progress ADD COLUMN ${columnName} ${definition}`);
-    }
-  }
 };
 
 const getCompletionFlags = async (userId) => {
@@ -116,7 +62,8 @@ const hydrateResponse = async (userId, row) => {
     referral_source: row.referral_source,
     referral_source_other: row.referral_source_other,
     completed: Boolean(row.completed_at),
-    video_watched: Boolean(row.video_watched),
+    video_watched: allIntroVideosWatched(row.intro_videos_watched),
+    intro_videos_watched: normalizeWatchedVideoIds(row.intro_videos_watched),
     selected_charlas: row.selected_charlas || [],
     selected_project: row.selected_project,
     charlas_completed: completion.charlasCompleted,
@@ -125,68 +72,6 @@ const hydrateResponse = async (userId, row) => {
 };
 
 const validateStep = (step) => STEP_ORDER.includes(step);
-
-const nullableBoolean = (value) => {
-  if (value === null || value === undefined || value === '') return null;
-  if ([true, 1, '1', 'true', 'yes'].includes(value)) return true;
-  if ([false, 0, '0', 'false', 'no'].includes(value)) return false;
-  return null;
-};
-
-const validateProfilePayload = (payload) => {
-  const requiredTextFields = [
-    'full_name',
-    'email',
-    'phone',
-    'country_id',
-    'date_of_birth',
-    'sex',
-    'availability',
-    'interest_area',
-    'previous_experience',
-    'referral_source',
-  ];
-  const missingField = requiredTextFields.find((field) => !String(payload[field] ?? '').trim());
-  if (missingField) return `${missingField} es requerido`;
-
-  if (nullableBoolean(payload.first_time_volunteer) === null) {
-    return 'first_time_volunteer es requerido';
-  }
-  if (nullableBoolean(payload.is_studying) === null) {
-    return 'is_studying es requerido';
-  }
-
-  const allowedValues = {
-    sex: ['female', 'male'],
-    availability: ['morning', 'afternoon', 'saturday', 'any'],
-    interest_area: ['community_schools', 'girls_club', 'youth'],
-    referral_source: [
-      'social_media',
-      'former_volunteer',
-      'university_fair',
-      'former_participant',
-      'employer',
-      'school_coordination',
-      'other',
-    ],
-  };
-
-  for (const [field, values] of Object.entries(allowedValues)) {
-    if (payload[field] && !values.includes(payload[field])) return `${field} contiene una opción inválida`;
-  }
-
-  if (payload.date_of_birth && !/^\d{4}-\d{2}-\d{2}$/.test(payload.date_of_birth)) {
-    return 'date_of_birth debe usar el formato YYYY-MM-DD';
-  }
-  if (payload.previous_experience && String(payload.previous_experience).length > 300) {
-    return 'previous_experience no puede superar 300 caracteres';
-  }
-  if (payload.referral_source === 'other' && !String(payload.referral_source_other || '').trim()) {
-    return 'Debes especificar cómo te enteraste del voluntariado';
-  }
-
-  return null;
-};
 
 const validateStepTransition = (currentStep, nextStep, completion) => {
   const currentIndex = STEP_ORDER.indexOf(currentStep);
@@ -230,6 +115,7 @@ router.get('/progress', ensureAuthenticated, async (req, res, next) => {
         referral_source_other: null,
         completed: false,
         video_watched: false,
+        intro_videos_watched: [],
         selected_charlas: [],
         selected_project: null,
         charlas_completed: false,
@@ -260,6 +146,9 @@ router.put('/progress', ensureAuthenticated, async (req, res, next) => {
 
     if (payload.selected_charlas && !Array.isArray(payload.selected_charlas)) {
       return res.status(400).json({ message: 'selected_charlas debe ser un arreglo' });
+    }
+    if (payload.intro_videos_watched && !Array.isArray(payload.intro_videos_watched)) {
+      return res.status(400).json({ message: 'intro_videos_watched debe ser un arreglo' });
     }
 
     const profileValidationError = validateProfilePayload(payload);
@@ -303,6 +192,7 @@ router.put('/progress', ensureAuthenticated, async (req, res, next) => {
     }
 
     const isStudying = nullableBoolean(payload.is_studying);
+    const introVideosWatched = normalizeWatchedVideoIds(payload.intro_videos_watched);
     const upsertValues = [
       req.user.id,
       nextStep,
@@ -321,7 +211,8 @@ router.put('/progress', ensureAuthenticated, async (req, res, next) => {
       payload.previous_experience ? String(payload.previous_experience).trim() : null,
       payload.referral_source || null,
       payload.referral_source === 'other' ? String(payload.referral_source_other || '').trim() || null : null,
-      Boolean(payload.video_watched),
+      JSON.stringify(introVideosWatched),
+      allIntroVideosWatched(introVideosWatched),
       JSON.stringify(payload.selected_charlas || []),
       payload.selected_project || null,
     ];
@@ -331,8 +222,8 @@ router.put('/progress', ensureAuthenticated, async (req, res, next) => {
        (user_id, current_step, full_name, email, phone, country_id, date_of_birth, sex,
         first_time_volunteer, is_studying, study_center, needs_service_hours, availability,
         interest_area, previous_experience, referral_source, referral_source_other,
-        video_watched, selected_charlas, selected_project)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        intro_videos_watched, video_watched, selected_charlas, selected_project)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON DUPLICATE KEY UPDATE
          current_step = VALUES(current_step),
          full_name = VALUES(full_name),
@@ -350,6 +241,7 @@ router.put('/progress', ensureAuthenticated, async (req, res, next) => {
          previous_experience = VALUES(previous_experience),
          referral_source = VALUES(referral_source),
          referral_source_other = VALUES(referral_source_other),
+         intro_videos_watched = VALUES(intro_videos_watched),
          video_watched = VALUES(video_watched),
          selected_charlas = VALUES(selected_charlas),
          selected_project = VALUES(selected_project)`,

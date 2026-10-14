@@ -4,6 +4,7 @@ const env = require('../config/env');
 const crypto = require('crypto');
 const pool = require('../config/db');
 const { detectCountryFromInput, detectCountryFromRequest } = require('../services/countryPortalService');
+const { saveInitialProfile, validateProfilePayload } = require('../services/volunteerOnboardingService');
 
 const router = express.Router();
 const normalizeRoleName = (value) =>
@@ -470,12 +471,24 @@ router.post('/admin/users', requireAdmin, async (req, res, next) => {
     const countryId = req.body?.country_id || req.body?.countryId || null;
     const status = req.body?.status || 'active';
     const password = String(req.body?.password || '');
+    const onboarding = req.body?.onboarding || null;
 
     if (!email || !firstName || !lastName || !roleId) {
       return res.status(400).json({ message: 'Correo, nombre, apellido y rol son requeridos' });
     }
     if (!validatePassword(password)) {
       return res.status(400).json({ message: 'La contrasena debe tener al menos 8 caracteres' });
+    }
+
+    const [roleRows] = await pool.query('SELECT name FROM roles WHERE id = ? LIMIT 1', [roleId]);
+    if (!roleRows.length) return res.status(400).json({ message: 'El rol seleccionado no existe' });
+    const isVolunteer = normalizeRoleName(roleRows[0].name) === 'volunteer';
+    if (isVolunteer) {
+      if (!onboarding || typeof onboarding !== 'object' || Array.isArray(onboarding)) {
+        return res.status(400).json({ message: 'La informacion inicial del voluntario es requerida' });
+      }
+      const onboardingError = validateProfilePayload(onboarding);
+      if (onboardingError) return res.status(400).json({ message: onboardingError });
     }
 
     const [existing] = await pool.query('SELECT id FROM users WHERE email = ? LIMIT 1', [email]);
@@ -489,8 +502,9 @@ router.post('/admin/users', requireAdmin, async (req, res, next) => {
     );
 
     const created = await getUserById(result.insertId);
-    if (normalizeRoleName(created?.role_name) === 'volunteer') {
+    if (isVolunteer) {
       await pool.query('INSERT IGNORE INTO volunteers (user_id, status) VALUES (?, ?)', [created.id, 'active']);
+      await saveInitialProfile(created.id, onboarding);
     }
 
     return res.status(201).json({ user: toSessionUser(created) });
