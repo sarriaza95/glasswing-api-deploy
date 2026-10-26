@@ -202,6 +202,22 @@ const getVolunteerForRequest = async (req, createIfMissing = false) => {
   return getVolunteerForUser(req.user.id, createIfMissing);
 };
 
+const coordinatorCanAccessVolunteer = async (req, volunteerId) => {
+  if (!req.userAccess?.isCoordinator) return true;
+  const countryId = req.userAccess.user?.country_id;
+  if (!countryId) return false;
+
+  const [rows] = await pool.query(
+    `SELECT v.id
+     FROM volunteers v
+     INNER JOIN users u ON u.id = v.user_id
+     WHERE v.id = ? AND u.country_id = ?
+     LIMIT 1`,
+    [volunteerId, countryId]
+  );
+  return rows.length > 0;
+};
+
 const normalizeAttendanceStatus = (value) => {
   const normalized = normalizeText(value || 'present');
   const statusMap = {
@@ -700,16 +716,30 @@ app.delete('/api/volunteer-impersonation/stop', ensureAuthenticated, (req, res, 
 });
 app.use('/api', apiRoleGate);
 
-app.get('/api/trainings', async (_req, res, next) => {
+app.get('/api/trainings', async (req, res, next) => {
   try {
-    const [rows] = await pool.query("SELECT *, 'grupo' AS stage FROM sessions WHERE session_type = 'specialized' ORDER BY scheduled_date DESC LIMIT 500");
+    const params = [];
+    let scopeFilter = '';
+    if (req.userAccess?.isCoach) {
+      const programIds = req.userAccess.scopedProgramIds.length ? req.userAccess.scopedProgramIds : [0];
+      scopeFilter = 'AND (coach_id = ? OR program_id IN (?))';
+      params.push(req.user.id, programIds);
+    }
+    const [rows] = await pool.query(
+      `SELECT *, 'grupo' AS stage
+       FROM sessions
+       WHERE session_type = 'specialized' ${scopeFilter}
+       ORDER BY scheduled_date DESC
+       LIMIT 500`,
+      params
+    );
     return res.json(rows);
   } catch (error) {
     return next(error);
   }
 });
 
-app.get('/api/trainings/:id', async (req, res, next) => {
+app.get('/api/trainings/:id', ...requireCoachSessionAccess, async (req, res, next) => {
   try {
     const [rows] = await pool.query("SELECT *, 'grupo' AS stage FROM sessions WHERE id = ? AND session_type = 'specialized' LIMIT 1", [req.params.id]);
     if (!rows.length) return res.status(404).json({ message: 'Registro no encontrado' });
@@ -794,9 +824,17 @@ app.get('/api/sessions', async (req, res, next) => {
       where.push("session_type = 'specialized'");
     }
 
+    const params = [];
+    if (req.userAccess?.isCoach) {
+      const programIds = req.userAccess.scopedProgramIds.length ? req.userAccess.scopedProgramIds : [0];
+      where.push('(coach_id = ? OR program_id IN (?))');
+      params.push(req.user.id, programIds);
+    }
+
     const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const [rows] = await pool.query(
-      `SELECT *, CASE WHEN session_type = 'specialized' THEN 'grupo' ELSE 'introduccion' END AS stage FROM sessions ${whereClause} ORDER BY scheduled_date DESC LIMIT 500`
+      `SELECT *, CASE WHEN session_type = 'specialized' THEN 'grupo' ELSE 'introduccion' END AS stage FROM sessions ${whereClause} ORDER BY scheduled_date DESC LIMIT 500`,
+      params
     );
     return res.json(rows);
   } catch (error) {
@@ -903,8 +941,15 @@ app.post('/api/volunteer-attendance/register', ensureAuthenticated, async (req, 
   }
 });
 
-app.get('/api/attendance-summary', async (_req, res, next) => {
+app.get('/api/attendance-summary', async (req, res, next) => {
   try {
+    const params = [];
+    let scopeFilter = '';
+    if (req.userAccess?.isCoach) {
+      const programIds = req.userAccess.scopedProgramIds.length ? req.userAccess.scopedProgramIds : [0];
+      scopeFilter = 'WHERE (s.coach_id = ? OR s.program_id IN (?))';
+      params.push(req.user.id, programIds);
+    }
     const [rows] = await pool.query(
       `SELECT
         s.id,
@@ -926,6 +971,7 @@ app.get('/api/attendance-summary', async (_req, res, next) => {
         ) AS attendance_percentage
        FROM sessions s
        LEFT JOIN session_attendance sa ON sa.session_id = s.id
+       ${scopeFilter}
        GROUP BY
         s.id,
         s.title,
@@ -936,7 +982,8 @@ app.get('/api/attendance-summary', async (_req, res, next) => {
         s.end_time,
         s.status
        ORDER BY s.scheduled_date DESC, s.start_time DESC
-       LIMIT 500`
+       LIMIT 500`,
+      params
     );
 
     return res.json(rows);
@@ -1039,6 +1086,9 @@ app.post('/api/volunteer_group_members', async (req, res, next) => {
 
     const [volunteers] = await pool.query('SELECT id FROM volunteers WHERE id = ? LIMIT 1', [volunteerId]);
     if (!volunteers.length) return res.status(404).json({ message: 'Voluntario no encontrado' });
+    if (!(await coordinatorCanAccessVolunteer(req, volunteerId))) {
+      return res.status(404).json({ message: 'Voluntario no encontrado' });
+    }
 
     await ensureVolunteerProgramEnrollment(volunteerId, groups[0].program_id);
 
@@ -1198,9 +1248,13 @@ app.post('/api/volunteer-documents/upload', ensureAuthenticated, async (req, res
   }
 });
 
-app.get('/api/volunteer-documents/review', async (_req, res, next) => {
+app.get('/api/volunteer-documents/review', async (req, res, next) => {
   try {
-    const documents = await getVolunteerDocumentRows();
+    const documents = req.userAccess?.isCoordinator
+      ? req.userAccess.user?.country_id
+        ? await getVolunteerDocumentRows('WHERE u.country_id = ?', [req.userAccess.user.country_id])
+        : []
+      : await getVolunteerDocumentRows();
     return res.json(documents);
   } catch (error) {
     return next(error);
@@ -1209,6 +1263,9 @@ app.get('/api/volunteer-documents/review', async (_req, res, next) => {
 
 app.get('/api/volunteer-documents/review/:volunteerId', async (req, res, next) => {
   try {
+    if (!(await coordinatorCanAccessVolunteer(req, req.params.volunteerId))) {
+      return res.status(404).json({ message: 'Voluntario no encontrado' });
+    }
     const documents = await getVolunteerDocumentRows('WHERE vd.volunteer_id = ?', [req.params.volunteerId]);
     return res.json(documents);
   } catch (error) {
@@ -1226,6 +1283,14 @@ app.put('/api/volunteer-documents/:id/review', async (req, res, next) => {
     }
     if (status === 'rejected' && !rejectionNote) {
       return res.status(400).json({ message: 'La nota de rechazo es requerida' });
+    }
+
+    const [documentAccessRows] = await pool.query(
+      'SELECT volunteer_id FROM volunteer_documents WHERE id = ? LIMIT 1',
+      [req.params.id]
+    );
+    if (!documentAccessRows.length || !(await coordinatorCanAccessVolunteer(req, documentAccessRows[0].volunteer_id))) {
+      return res.status(404).json({ message: 'Documento no encontrado' });
     }
 
     const reviewerId = req.user?.id || null;
@@ -1280,7 +1345,7 @@ app.get('/api/volunteer-form-requests/me', ensureAuthenticated, async (req, res,
   }
 });
 
-app.get('/api/volunteer-form-requests/review', async (_req, res, next) => {
+app.get('/api/volunteer-form-requests/review', async (req, res, next) => {
   try {
     await pool.query(
       `UPDATE volunteer_form_requests
@@ -1288,6 +1353,17 @@ app.get('/api/volunteer-form-requests/review', async (_req, res, next) => {
        WHERE status IN ('requested', 'in_progress', 'rejected')
          AND due_date < CURDATE()`
     );
+
+    const params = [];
+    let accessFilter = '';
+    if (req.userAccess?.isCoordinator) {
+      if (req.userAccess.user?.country_id) {
+        accessFilter = 'WHERE u.country_id = ?';
+        params.push(req.userAccess.user.country_id);
+      } else {
+        accessFilter = 'WHERE 1 = 0';
+      }
+    }
 
     const [volunteers] = await pool.query(
       `SELECT
@@ -1323,8 +1399,10 @@ app.get('/api/volunteer-form-requests/review', async (_req, res, next) => {
          ) latest_request ON latest_request.id = vfr.id
        ) latest ON latest.volunteer_id = v.id
        LEFT JOIN programs p ON p.id = latest.program_id
+       ${accessFilter}
        ORDER BY latest.created_at DESC, u.first_name, u.last_name
-       LIMIT 500`
+       LIMIT 500`,
+      params
     );
 
     const rows = await Promise.all(
@@ -1359,6 +1437,9 @@ app.post('/api/volunteer-form-requests', async (req, res, next) => {
 
     const [volunteers] = await pool.query('SELECT id FROM volunteers WHERE id = ? LIMIT 1', [volunteerId]);
     if (!volunteers.length) return res.status(404).json({ message: 'Voluntario no encontrado' });
+    if (!(await coordinatorCanAccessVolunteer(req, volunteerId))) {
+      return res.status(404).json({ message: 'Voluntario no encontrado' });
+    }
 
     if (programId) {
       const [programs] = await pool.query('SELECT id FROM programs WHERE id = ? LIMIT 1', [programId]);
@@ -1387,6 +1468,9 @@ app.put('/api/volunteer-form-requests/:id/resend', async (req, res, next) => {
     if (!requests.length) return res.status(404).json({ message: 'Solicitud no encontrada' });
 
     const request = requests[0];
+    if (!(await coordinatorCanAccessVolunteer(req, request.volunteer_id))) {
+      return res.status(404).json({ message: 'Solicitud no encontrada' });
+    }
     if (request.status !== 'expired') {
       return res.status(400).json({ message: 'Solo se pueden reenviar solicitudes vencidas' });
     }
@@ -1473,6 +1557,9 @@ app.put('/api/volunteer-form-requests/:id/review', async (req, res, next) => {
     if (!requests.length) return res.status(404).json({ message: 'Solicitud no encontrada' });
 
     const request = requests[0];
+    if (!(await coordinatorCanAccessVolunteer(req, request.volunteer_id))) {
+      return res.status(404).json({ message: 'Solicitud no encontrada' });
+    }
     if (status === 'approved') {
       if (!request.form_data) {
         return res.status(400).json({ message: 'El voluntario debe completar el formulario antes de aprobar' });

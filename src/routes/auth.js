@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const pool = require('../config/db');
 const { detectCountryFromInput, detectCountryFromRequest } = require('../services/countryPortalService');
 const { saveInitialProfile, validateProfilePayload } = require('../services/volunteerOnboardingService');
+const { normalizeRole } = require('../middleware/rbac');
 
 const router = express.Router();
 const normalizeRoleName = (value) =>
@@ -92,7 +93,7 @@ const requireAdmin = async (req, res, next) => {
       return res.status(401).json({ message: 'No autenticado' });
     }
     const freshUser = await getUserById(req.user.id);
-    if (normalizeRoleName(freshUser?.role_name) !== 'admin' && normalizeRoleName(freshUser?.role_name) !== 'administrador') {
+    if (normalizeRole(freshUser?.role_name) !== 'admin') {
       return res.status(403).json({ message: 'No tienes permisos para realizar esta accion' });
     }
     req.freshUser = freshUser;
@@ -101,6 +102,27 @@ const requireAdmin = async (req, res, next) => {
     return next(error);
   }
 };
+
+const requireStaff = (...allowedRoles) => async (req, res, next) => {
+  try {
+    if (!req.isAuthenticated?.() || !req.user?.id) {
+      return res.status(401).json({ message: 'No autenticado' });
+    }
+    const freshUser = await getUserById(req.user.id);
+    const role = normalizeRole(freshUser?.role_name);
+    if (!allowedRoles.includes(role)) {
+      return res.status(403).json({ message: 'No tienes permisos para realizar esta accion' });
+    }
+    req.freshUser = freshUser;
+    req.staffRole = role;
+    return next();
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const requireVolunteerManager = requireStaff('admin', 'coordinator');
+const requireOperationalStaff = requireStaff('admin', 'coordinator', 'coach');
 
 const validatePassword = (password) =>
   typeof password === 'string' && password.length >= 8;
@@ -439,6 +461,116 @@ router.put('/profile/password', ensureAuthenticated, async (req, res, next) => {
     );
 
     return res.json({ message: 'Contrasena actualizada correctamente' });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.get('/staff/user-options', requireOperationalStaff, async (req, res, next) => {
+  try {
+    const params = [];
+    let countryFilter = '';
+    if (req.staffRole !== 'admin') {
+      if (!req.freshUser?.country_id) return res.json([]);
+      countryFilter = 'WHERE u.country_id = ?';
+      params.push(req.freshUser.country_id);
+    }
+
+    const [users] = await pool.query(
+      `SELECT u.id, u.email, u.first_name, u.last_name, u.phone, u.role_id, u.country_id, u.status,
+        r.name AS role_name, c.name AS country_name
+       FROM users u
+       LEFT JOIN roles r ON r.id = u.role_id
+       LEFT JOIN countries c ON c.id = u.country_id
+       ${countryFilter}
+       ORDER BY u.first_name, u.last_name, u.email
+       LIMIT 1000`,
+      params
+    );
+    return res.json(users);
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.get('/staff/volunteers', requireVolunteerManager, async (req, res, next) => {
+  try {
+    const params = [];
+    let countryFilter = '';
+    if (req.staffRole === 'coordinator') {
+      if (!req.freshUser?.country_id) return res.json([]);
+      countryFilter = 'AND u.country_id = ?';
+      params.push(req.freshUser.country_id);
+    }
+
+    const [users] = await pool.query(
+      `SELECT u.id, u.email, u.first_name, u.last_name, u.phone, u.profile_image_url,
+        u.role_id, u.country_id, u.status, r.name AS role_name, c.name AS country_name,
+        v.id AS volunteer_id
+       FROM users u
+       INNER JOIN roles r ON r.id = u.role_id
+       LEFT JOIN countries c ON c.id = u.country_id
+       LEFT JOIN volunteers v ON v.user_id = u.id
+       WHERE LOWER(r.name) IN ('volunteer', 'voluntario')
+       ${countryFilter}
+       ORDER BY u.created_at DESC, u.id DESC
+       LIMIT 500`,
+      params
+    );
+    return res.json(users);
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.post('/staff/volunteers', requireVolunteerManager, async (req, res, next) => {
+  try {
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    const firstName = String(req.body?.first_name || req.body?.firstName || '').trim();
+    const lastName = String(req.body?.last_name || req.body?.lastName || '').trim();
+    const phone = String(req.body?.phone || '').trim() || null;
+    const status = req.body?.status || 'active';
+    const password = String(req.body?.password || '');
+    const onboarding = req.body?.onboarding || null;
+    const requestedCountryId = req.body?.country_id || req.body?.countryId || null;
+    const countryId = req.staffRole === 'coordinator' ? req.freshUser?.country_id : requestedCountryId;
+
+    if (!email || !firstName || !lastName || !countryId) {
+      return res.status(400).json({ message: 'Correo, nombre, apellido y pais son requeridos' });
+    }
+    if (!validatePassword(password)) {
+      return res.status(400).json({ message: 'La contrasena debe tener al menos 8 caracteres' });
+    }
+    if (!onboarding || typeof onboarding !== 'object' || Array.isArray(onboarding)) {
+      return res.status(400).json({ message: 'La informacion inicial del voluntario es requerida' });
+    }
+    const onboardingPayload = { ...onboarding, country_id: countryId };
+    const onboardingError = validateProfilePayload(onboardingPayload);
+    if (onboardingError) return res.status(400).json({ message: onboardingError });
+
+    const [countryRows] = await pool.query('SELECT id FROM countries WHERE id = ? AND status = ? LIMIT 1', [countryId, 'active']);
+    if (!countryRows.length) return res.status(400).json({ message: 'El pais seleccionado no esta disponible' });
+
+    const [roleRows] = await pool.query(
+      "SELECT id FROM roles WHERE LOWER(name) IN ('volunteer', 'voluntario') ORDER BY id LIMIT 1"
+    );
+    if (!roleRows.length) return res.status(500).json({ message: 'No existe el rol de voluntario' });
+
+    const [existing] = await pool.query('SELECT id FROM users WHERE LOWER(email) = ? LIMIT 1', [email]);
+    if (existing.length) return res.status(409).json({ message: 'Ya existe un usuario con ese correo' });
+
+    const [result] = await pool.query(
+      `INSERT INTO users
+       (google_id, email, first_name, last_name, phone, role_id, country_id, status, password_hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [`local:${email}`, email, firstName, lastName, phone, roleRows[0].id, countryId, status, hashPassword(password)]
+    );
+
+    await pool.query('INSERT IGNORE INTO volunteers (user_id, status) VALUES (?, ?)', [result.insertId, 'active']);
+    await saveInitialProfile(result.insertId, onboardingPayload);
+
+    const created = await getUserById(result.insertId);
+    return res.status(201).json({ user: toSessionUser(created) });
   } catch (error) {
     return next(error);
   }

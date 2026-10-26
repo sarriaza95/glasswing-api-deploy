@@ -8,6 +8,22 @@ const getTableConfig = (table) => tables[table] || null;
 
 const buildSetClause = (payload) => Object.keys(payload).map((key) => `\`${key}\` = ?`).join(', ');
 
+const coordinatorCanAccessVolunteer = async (req, volunteerId) => {
+  if (!req.userAccess?.isCoordinator) return true;
+  const countryId = req.userAccess.user?.country_id;
+  if (!countryId) return false;
+
+  const [rows] = await pool.query(
+    `SELECT v.id
+     FROM volunteers v
+     INNER JOIN users u ON u.id = v.user_id
+     WHERE v.id = ? AND u.country_id = ?
+     LIMIT 1`,
+    [volunteerId, countryId]
+  );
+  return rows.length > 0;
+};
+
 const normalizeText = (value) =>
   String(value)
     .trim()
@@ -258,6 +274,35 @@ router.get('/:table', async (req, res) => {
   const config = getTableConfig(req.params.table);
   if (!config) return res.status(404).json({ message: 'Tabla no soportada' });
 
+  if (req.params.table === 'volunteers') {
+    const params = [];
+    let accessFilter = '';
+    if (req.userAccess?.isCoordinator) {
+      if (!req.userAccess.user?.country_id) return res.json([]);
+      accessFilter = 'WHERE u.country_id = ?';
+      params.push(req.userAccess.user.country_id);
+    }
+
+    const [rows] = await pool.query(
+      `SELECT v.*, u.first_name, u.last_name, u.email, u.phone, u.country_id,
+        c.name AS country_name
+       FROM volunteers v
+       INNER JOIN users u ON u.id = v.user_id
+       LEFT JOIN countries c ON c.id = u.country_id
+       ${accessFilter}
+       ORDER BY u.first_name, u.last_name, v.id
+       LIMIT 500`,
+      params
+    );
+    return res.json(rows);
+  }
+
+  if (req.params.table === 'programs' && req.userAccess?.isCoach) {
+    const programIds = req.userAccess.scopedProgramIds.length ? req.userAccess.scopedProgramIds : [0];
+    const [rows] = await pool.query('SELECT * FROM programs WHERE id IN (?) LIMIT 500', [programIds]);
+    return res.json(rows);
+  }
+
   const [rows] = await pool.query(`SELECT * FROM \`${req.params.table}\` LIMIT 500`);
   return res.json(rows);
 });
@@ -265,6 +310,23 @@ router.get('/:table', async (req, res) => {
 router.get('/:table/:id', async (req, res) => {
   const config = getTableConfig(req.params.table);
   if (!config) return res.status(404).json({ message: 'Tabla no soportada' });
+
+  if (req.params.table === 'sessions' && req.userAccess?.isCoach) {
+    const programIds = req.userAccess.scopedProgramIds.length ? req.userAccess.scopedProgramIds : [0];
+    const [rows] = await pool.query(
+      `SELECT * FROM sessions
+       WHERE id = ? AND (coach_id = ? OR program_id IN (?))
+       LIMIT 1`,
+      [req.params.id, req.user.id, programIds]
+    );
+    if (!rows.length) return res.status(404).json({ message: 'Registro no encontrado' });
+    return res.json(rows[0]);
+  }
+
+
+  if (req.params.table === 'volunteers' && !(await coordinatorCanAccessVolunteer(req, req.params.id))) {
+    return res.status(404).json({ message: 'Registro no encontrado' });
+  }
 
   const [rows] = await pool.query(
     `SELECT * FROM \`${req.params.table}\` WHERE \`${config.pk}\` = ? LIMIT 1`,
@@ -278,6 +340,12 @@ router.get('/:table/:id', async (req, res) => {
 router.post('/:table', async (req, res) => {
   const config = getTableConfig(req.params.table);
   if (!config) return res.status(404).json({ message: 'Tabla no soportada' });
+
+  if (req.params.table === 'volunteers' && req.userAccess?.isCoordinator) {
+    return res.status(403).json({
+      message: 'Utiliza el registro completo de voluntarios para crear el usuario y su perfil',
+    });
+  }
 
   const { payload, invalidFields, invalidEnums } = normalizePayload(req.params.table, config, req.body);
   if (invalidFields.length) {
@@ -311,6 +379,10 @@ router.put('/:table/:id', async (req, res) => {
   const config = getTableConfig(req.params.table);
   if (!config) return res.status(404).json({ message: 'Tabla no soportada' });
 
+  if (req.params.table === 'volunteers' && !(await coordinatorCanAccessVolunteer(req, req.params.id))) {
+    return res.status(404).json({ message: 'Registro no encontrado' });
+  }
+
   const { payload, invalidFields, invalidEnums } = normalizePayload(req.params.table, config, req.body);
   if (invalidFields.length) {
     return res.status(400).json({ message: 'Campos no soportados para esta tabla', fields: invalidFields });
@@ -343,6 +415,10 @@ router.put('/:table/:id', async (req, res) => {
 router.delete('/:table/:id', async (req, res) => {
   const config = getTableConfig(req.params.table);
   if (!config) return res.status(404).json({ message: 'Tabla no soportada' });
+
+  if (req.params.table === 'volunteers' && !(await coordinatorCanAccessVolunteer(req, req.params.id))) {
+    return res.status(404).json({ message: 'Registro no encontrado' });
+  }
 
   const [result] = await pool.query(
     `DELETE FROM \`${req.params.table}\` WHERE \`${config.pk}\` = ?`,
