@@ -112,8 +112,9 @@ const ensureOnboardingContentTables = async () => {
        FROM volunteer_onboarding_progress vop
        INNER JOIN onboarding_videos ov
          ON JSON_CONTAINS(COALESCE(vop.intro_videos_watched, JSON_ARRAY()), JSON_QUOTE(ov.external_key))
-       ON DUPLICATE KEY UPDATE watched_percentage = GREATEST(watched_percentage, VALUES(watched_percentage)),
-         completed_at = COALESCE(completed_at, VALUES(completed_at))`
+       ON DUPLICATE KEY UPDATE
+         watched_percentage = GREATEST(onboarding_video_progress.watched_percentage, VALUES(watched_percentage)),
+         completed_at = COALESCE(onboarding_video_progress.completed_at, VALUES(completed_at))`
     );
   }
 };
