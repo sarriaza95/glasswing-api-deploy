@@ -7,6 +7,7 @@ const passport = require('./config/passport');
 const authRouter = require('./routes/auth');
 const crudRouter = require('./routes/crud');
 const onboardingRouter = require('./routes/volunteerOnboarding');
+const onboardingContentRouter = require('./routes/onboardingContent');
 const pool = require('./config/db');
 const { apiRoleGate, requireCoachProgramBodyAccess, requireCoachSessionAccess } = require('./middleware/rbac');
 
@@ -558,6 +559,7 @@ app.get('/health', (_req, res) => {
 app.use('/api/auth', authRouter);
 app.use('/auth', authRouter);
 
+app.use('/api/onboarding-content', onboardingContentRouter);
 app.use('/api/volunteer-onboarding', onboardingRouter);
 
 app.get('/api/geography/countries', ensureAuthenticated, async (_req, res, next) => {

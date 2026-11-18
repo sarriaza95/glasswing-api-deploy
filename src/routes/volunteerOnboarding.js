@@ -1,12 +1,17 @@
 const express = require('express');
 const pool = require('../config/db');
 const {
-  allIntroVideosWatched,
   ensureProgressTable,
-  normalizeWatchedVideoIds,
   nullableBoolean,
   validateProfilePayload,
 } = require('../services/volunteerOnboardingService');
+const {
+  ensureOnboardingContentTables,
+  getVideoCompletion,
+  getVolunteerVideos,
+  parseJson,
+} = require('../services/onboardingContentService');
+const { normalizeRole } = require('../middleware/rbac');
 
 const router = express.Router();
 
@@ -19,6 +24,55 @@ const ensureAuthenticated = (req, res, next) => {
 
   return next();
 };
+
+const resolveOnboardingUser = async (req, res, next) => {
+  try {
+    const managedVolunteerId = req.session?.managedVolunteerId;
+    if (!managedVolunteerId) {
+      req.onboardingUser = {
+        id: req.user.id,
+        displayName: req.user.displayName || null,
+        email: req.user.email || null,
+      };
+      return next();
+    }
+
+    const [staffRows] = await pool.query(
+      `SELECT r.name AS role_name
+       FROM users u
+       LEFT JOIN roles r ON r.id = u.role_id
+       WHERE u.id = ? AND u.status = 'active'
+       LIMIT 1`,
+      [req.user.id]
+    );
+    if (!['admin', 'coach'].includes(normalizeRole(staffRows[0]?.role_name))) {
+      return res.status(403).json({ message: 'No tienes permisos para gestionar como voluntario' });
+    }
+
+    const [volunteerRows] = await pool.query(
+      `SELECT u.id, u.email, CONCAT_WS(' ', u.first_name, u.last_name) AS display_name
+       FROM volunteers v
+       INNER JOIN users u ON u.id = v.user_id
+       WHERE v.id = ?
+       LIMIT 1`,
+      [managedVolunteerId]
+    );
+    if (!volunteerRows.length) {
+      return res.status(409).json({ message: 'El voluntario gestionado no tiene un usuario asociado' });
+    }
+
+    req.onboardingUser = {
+      id: volunteerRows[0].id,
+      displayName: volunteerRows[0].display_name || null,
+      email: volunteerRows[0].email || null,
+    };
+    return next();
+  } catch (error) {
+    return next(error);
+  }
+};
+
+router.use(ensureAuthenticated, resolveOnboardingUser);
 
 const getCompletionFlags = async (userId) => {
   const [rows] = await pool.query(
@@ -43,6 +97,7 @@ const getCompletionFlags = async (userId) => {
 
 const hydrateResponse = async (userId, row) => {
   const completion = await getCompletionFlags(userId);
+  const videoCompletion = await getVideoCompletion(userId);
 
   return {
     current_step: row.current_step,
@@ -62,8 +117,8 @@ const hydrateResponse = async (userId, row) => {
     referral_source: row.referral_source,
     referral_source_other: row.referral_source_other,
     completed: Boolean(row.completed_at),
-    video_watched: allIntroVideosWatched(row.intro_videos_watched),
-    intro_videos_watched: normalizeWatchedVideoIds(row.intro_videos_watched),
+    video_watched: videoCompletion.complete,
+    intro_videos_watched: videoCompletion.completedExternalKeys,
     selected_charlas: row.selected_charlas || [],
     selected_project: row.selected_project,
     charlas_completed: completion.charlasCompleted,
@@ -87,19 +142,111 @@ const validateStepTransition = (currentStep, nextStep, completion) => {
   return 'No puedes saltar pasos del onboarding';
 };
 
+router.get('/videos', ensureAuthenticated, async (req, res, next) => {
+  try {
+    return res.json(await getVolunteerVideos(req.onboardingUser.id));
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.put('/videos/:videoId/progress', ensureAuthenticated, async (req, res, next) => {
+  try {
+    await ensureOnboardingContentTables();
+    const watchedPercentage = Math.min(100, Math.max(0, Number(req.body?.watched_percentage || 0)));
+    if (!Number.isFinite(watchedPercentage)) {
+      return res.status(400).json({ message: 'El porcentaje visto es inválido' });
+    }
+    const [videos] = await pool.query(
+      "SELECT id FROM onboarding_videos WHERE id = ? AND status = 'active' LIMIT 1",
+      [req.params.videoId]
+    );
+    if (!videos.length) return res.status(404).json({ message: 'Video no encontrado' });
+
+    await pool.query(
+      `INSERT INTO onboarding_video_progress (user_id, video_id, watched_percentage, completed_at)
+       VALUES (?, ?, ?, IF(? >= 100, CURRENT_TIMESTAMP, NULL))
+       ON DUPLICATE KEY UPDATE
+         watched_percentage = GREATEST(watched_percentage, VALUES(watched_percentage)),
+         completed_at = IF(GREATEST(watched_percentage, VALUES(watched_percentage)) >= 100,
+           COALESCE(completed_at, CURRENT_TIMESTAMP), completed_at)`,
+      [req.onboardingUser.id, req.params.videoId, watchedPercentage, watchedPercentage]
+    );
+    const videosPayload = await getVolunteerVideos(req.onboardingUser.id);
+    return res.json(videosPayload.find((video) => Number(video.id) === Number(req.params.videoId)) || null);
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.put('/videos/:videoId/answers', ensureAuthenticated, async (req, res, next) => {
+  try {
+    await ensureOnboardingContentTables();
+    const answers = Array.isArray(req.body?.answers) ? req.body.answers : [];
+    const [progressRows] = await pool.query(
+      `SELECT watched_percentage
+       FROM onboarding_video_progress
+       WHERE user_id = ? AND video_id = ?
+       LIMIT 1`,
+      [req.onboardingUser.id, req.params.videoId]
+    );
+    if (Number(progressRows[0]?.watched_percentage || 0) < 100) {
+      return res.status(422).json({ message: 'Debes ver el video al 100% antes de responder las preguntas' });
+    }
+    const [questions] = await pool.query(
+      `SELECT id, answer_type, options_json, is_required
+       FROM onboarding_video_questions
+       WHERE video_id = ?
+       ORDER BY sort_order, id`,
+      [req.params.videoId]
+    );
+    if (!questions.length) {
+      const videosPayload = await getVolunteerVideos(req.onboardingUser.id);
+      return res.json(videosPayload.find((video) => Number(video.id) === Number(req.params.videoId)) || null);
+    }
+
+    const answersByQuestion = new Map(answers.map((answer) => [Number(answer.question_id), String(answer.answer || '').trim()]));
+    for (const question of questions) {
+      const answer = answersByQuestion.get(Number(question.id)) || '';
+      if (question.is_required && !answer) {
+        return res.status(400).json({ message: 'Debes responder todas las preguntas obligatorias' });
+      }
+      if (!answer) continue;
+      if (question.answer_type === 'multiple_choice') {
+        const options = parseJson(question.options_json, []);
+        if (!options.includes(answer)) {
+          return res.status(400).json({ message: 'Una de las respuestas seleccionadas no es válida' });
+        }
+      }
+      await pool.query(
+        `INSERT INTO onboarding_video_answers (user_id, video_id, question_id, answer_text)
+         VALUES (?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE answer_text = VALUES(answer_text), answered_at = CURRENT_TIMESTAMP,
+           updated_at = CURRENT_TIMESTAMP`,
+        [req.onboardingUser.id, req.params.videoId, question.id, answer]
+      );
+    }
+
+    const videosPayload = await getVolunteerVideos(req.onboardingUser.id);
+    return res.json(videosPayload.find((video) => Number(video.id) === Number(req.params.videoId)) || null);
+  } catch (error) {
+    return next(error);
+  }
+});
+
 router.get('/progress', ensureAuthenticated, async (req, res, next) => {
   try {
     await ensureProgressTable();
 
     const [rows] = await pool.query('SELECT * FROM volunteer_onboarding_progress WHERE user_id = ? LIMIT 1', [
-      req.user.id,
+      req.onboardingUser.id,
     ]);
 
     if (!rows.length) {
       return res.json({
         current_step: 'personal-info',
-        full_name: req.user.displayName || null,
-        email: req.user.email || null,
+        full_name: req.onboardingUser.displayName || null,
+        email: req.onboardingUser.email || null,
         phone: null,
         country_id: req.user.country?.id || null,
         date_of_birth: null,
@@ -128,7 +275,7 @@ router.get('/progress', ensureAuthenticated, async (req, res, next) => {
       row.selected_charlas = JSON.parse(row.selected_charlas || '[]');
     }
 
-    return res.json(await hydrateResponse(req.user.id, row));
+    return res.json(await hydrateResponse(req.onboardingUser.id, row));
   } catch (error) {
     return next(error);
   }
@@ -157,16 +304,22 @@ router.put('/progress', ensureAuthenticated, async (req, res, next) => {
     }
 
     const [existingRows] = await pool.query('SELECT * FROM volunteer_onboarding_progress WHERE user_id = ? LIMIT 1', [
-      req.user.id,
+      req.onboardingUser.id,
     ]);
 
-    const completion = await getCompletionFlags(req.user.id);
+    const completion = await getCompletionFlags(req.onboardingUser.id);
+    const videoCompletion = await getVideoCompletion(req.onboardingUser.id);
     const currentStep = existingRows[0]?.current_step || 'personal-info';
     const nextStep = payload.current_step || currentStep;
     const transitionError = validateStepTransition(currentStep, nextStep, completion);
 
     if (transitionError) {
       return res.status(422).json({ message: transitionError, charlas_completed: completion.charlasCompleted, trainings_completed: completion.trainingsCompleted });
+    }
+    if (STEP_ORDER.indexOf(nextStep) > STEP_ORDER.indexOf('intro-video') && !videoCompletion.complete) {
+      return res.status(422).json({
+        message: 'Debes ver todos los videos al 100% y responder sus preguntas antes de continuar',
+      });
     }
 
     if (Array.isArray(payload.selected_charlas) && payload.selected_charlas.length) {
@@ -192,9 +345,9 @@ router.put('/progress', ensureAuthenticated, async (req, res, next) => {
     }
 
     const isStudying = nullableBoolean(payload.is_studying);
-    const introVideosWatched = normalizeWatchedVideoIds(payload.intro_videos_watched);
+    const introVideosWatched = videoCompletion.completedExternalKeys;
     const upsertValues = [
-      req.user.id,
+      req.onboardingUser.id,
       nextStep,
       payload.full_name || null,
       payload.email || null,
@@ -212,7 +365,7 @@ router.put('/progress', ensureAuthenticated, async (req, res, next) => {
       payload.referral_source || null,
       payload.referral_source === 'other' ? String(payload.referral_source_other || '').trim() || null : null,
       JSON.stringify(introVideosWatched),
-      allIntroVideosWatched(introVideosWatched),
+      videoCompletion.complete,
       JSON.stringify(payload.selected_charlas || []),
       payload.selected_project || null,
     ];
@@ -251,12 +404,12 @@ router.put('/progress', ensureAuthenticated, async (req, res, next) => {
     if (payload.completed === true && nextStep === 'trainings') {
       await pool.query(
         'UPDATE volunteer_onboarding_progress SET completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP) WHERE user_id = ?',
-        [req.user.id]
+        [req.onboardingUser.id]
       );
     }
 
     const [rows] = await pool.query('SELECT * FROM volunteer_onboarding_progress WHERE user_id = ? LIMIT 1', [
-      req.user.id,
+      req.onboardingUser.id,
     ]);
 
     const row = rows[0];
@@ -264,7 +417,7 @@ router.put('/progress', ensureAuthenticated, async (req, res, next) => {
       row.selected_charlas = JSON.parse(row.selected_charlas || '[]');
     }
 
-    return res.json(await hydrateResponse(req.user.id, row));
+    return res.json(await hydrateResponse(req.onboardingUser.id, row));
   } catch (error) {
     return next(error);
   }

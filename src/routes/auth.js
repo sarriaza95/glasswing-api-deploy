@@ -31,6 +31,48 @@ const verifyPassword = (password, storedHash) => {
   return crypto.timingSafeEqual(Buffer.from(candidate, 'hex'), Buffer.from(originalHash, 'hex'));
 };
 
+const SECURITY_QUESTIONS = Object.freeze({
+  first_school: '¿Cuál fue el nombre de tu primera escuela?',
+  childhood_nickname: '¿Cuál era tu apodo de infancia?',
+  favorite_teacher: '¿Cuál era el apellido de tu docente favorito?',
+  memorable_place: '¿Cuál es un lugar que recuerdas especialmente?',
+  personal_phrase: '¿Cuál es una palabra o frase que solo tú reconocerías?',
+});
+
+const recoveryAttempts = new Map();
+const RECOVERY_WINDOW_MS = 15 * 60 * 1000;
+const MAX_RECOVERY_ATTEMPTS = 5;
+
+const normalizeSecurityAnswer = (value) =>
+  String(value || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ');
+
+const validateSecurityQuestion = (question) => Boolean(SECURITY_QUESTIONS[question]);
+const validateSecurityAnswer = (answer) => normalizeSecurityAnswer(answer).length >= 3;
+const hashSecurityAnswer = (answer) => hashPassword(normalizeSecurityAnswer(answer));
+const verifySecurityAnswer = (answer, storedHash) => verifyPassword(normalizeSecurityAnswer(answer), storedHash);
+
+const recoveryAttemptKey = (req, email) => `${req.ip || 'unknown'}:${email}`;
+const getRecoveryAttempt = (key) => {
+  const attempt = recoveryAttempts.get(key);
+  if (!attempt || Date.now() - attempt.startedAt > RECOVERY_WINDOW_MS) {
+    recoveryAttempts.delete(key);
+    return null;
+  }
+  return attempt;
+};
+
+const recordRecoveryFailure = (key) => {
+  const current = getRecoveryAttempt(key);
+  recoveryAttempts.set(key, current
+    ? { ...current, count: current.count + 1 }
+    : { count: 1, startedAt: Date.now() });
+};
+
 const getUserById = async (id) => {
   const [rows] = await pool.query(
     `SELECT
@@ -306,12 +348,17 @@ router.post('/register', async (req, res, next) => {
     const phone = String(req.body?.phone || '').trim() || null;
     const countryId = req.body?.country_id || req.body?.countryId || null;
     const password = String(req.body?.password || '');
+    const securityQuestion = String(req.body?.security_question || '').trim();
+    const securityAnswer = String(req.body?.security_answer || '');
 
     if (!email || !firstName || !lastName || !password) {
       return res.status(400).json({ message: 'Correo, nombre, apellido y contrasena son requeridos' });
     }
     if (!validatePassword(password)) {
       return res.status(400).json({ message: 'La contrasena debe tener al menos 8 caracteres' });
+    }
+    if (!validateSecurityQuestion(securityQuestion) || !validateSecurityAnswer(securityAnswer)) {
+      return res.status(400).json({ message: 'Selecciona una pregunta y escribe una respuesta de al menos 3 caracteres' });
     }
 
     const [existing] = await pool.query('SELECT id FROM users WHERE LOWER(email) = ? LIMIT 1', [email]);
@@ -346,9 +393,11 @@ router.post('/register', async (req, res, next) => {
     }
     const [result] = await pool.query(
       `INSERT INTO users
-       (google_id, email, first_name, last_name, phone, role_id, country_id, status, password_hash)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [`local:${email}`, email, firstName, lastName, phone, volunteerRoleId, finalCountryId, 'active', hashPassword(password)]
+       (google_id, email, first_name, last_name, phone, role_id, country_id, status, password_hash,
+        security_question, security_answer_hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [`local:${email}`, email, firstName, lastName, phone, volunteerRoleId, finalCountryId, 'active',
+        hashPassword(password), securityQuestion, hashSecurityAnswer(securityAnswer)]
     );
 
     const created = await getUserById(result.insertId);
@@ -359,6 +408,84 @@ router.post('/register', async (req, res, next) => {
       if (error) return next(error);
       return res.status(201).json({ user: sessionUser });
     });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.get('/password-recovery/questions', (_req, res) => {
+  return res.json(Object.entries(SECURITY_QUESTIONS).map(([value, label]) => ({ value, label })));
+});
+
+router.post('/password-recovery/question', async (req, res, next) => {
+  try {
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    if (!email) return res.status(400).json({ message: 'El correo es requerido' });
+
+    const key = recoveryAttemptKey(req, email);
+    const attempt = getRecoveryAttempt(key);
+    if (attempt?.count >= MAX_RECOVERY_ATTEMPTS) {
+      return res.status(429).json({ message: 'Demasiados intentos. Intenta nuevamente en 15 minutos.' });
+    }
+
+    const [users] = await pool.query(
+      `SELECT security_question
+       FROM users
+       WHERE LOWER(email) = ? AND status = 'active'
+       LIMIT 1`,
+      [email]
+    );
+    const question = users[0]?.security_question;
+    if (!validateSecurityQuestion(question)) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      return res.status(404).json({ message: 'La cuenta no tiene recuperación por pregunta configurada' });
+    }
+
+    return res.json({ question, question_label: SECURITY_QUESTIONS[question] });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.post('/password-recovery/reset', async (req, res, next) => {
+  try {
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    const answer = String(req.body?.security_answer || '');
+    const newPassword = String(req.body?.new_password || '');
+    if (!email || !answer || !newPassword) {
+      return res.status(400).json({ message: 'Correo, respuesta y nueva contrasena son requeridos' });
+    }
+    if (!validatePassword(newPassword)) {
+      return res.status(400).json({ message: 'La nueva contrasena debe tener al menos 8 caracteres' });
+    }
+
+    const key = recoveryAttemptKey(req, email);
+    const attempt = getRecoveryAttempt(key);
+    if (attempt?.count >= MAX_RECOVERY_ATTEMPTS) {
+      return res.status(429).json({ message: 'Demasiados intentos. Intenta nuevamente en 15 minutos.' });
+    }
+
+    const [users] = await pool.query(
+      `SELECT id, security_answer_hash
+       FROM users
+       WHERE LOWER(email) = ? AND status = 'active'
+       LIMIT 1`,
+      [email]
+    );
+    const user = users[0];
+    if (!user?.security_answer_hash || !verifySecurityAnswer(answer, user.security_answer_hash)) {
+      recordRecoveryFailure(key);
+      return res.status(401).json({ message: 'La respuesta no es correcta' });
+    }
+
+    await pool.query(
+      `UPDATE users
+       SET password_hash = ?, password_reset_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+      [hashPassword(newPassword), user.id]
+    );
+    recoveryAttempts.delete(key);
+    return res.json({ message: 'Contrasena restablecida correctamente' });
   } catch (error) {
     return next(error);
   }
@@ -466,6 +593,52 @@ router.put('/profile/password', ensureAuthenticated, async (req, res, next) => {
   }
 });
 
+router.get('/profile/security', ensureAuthenticated, async (req, res, next) => {
+  try {
+    const [users] = await pool.query(
+      'SELECT security_question FROM users WHERE id = ? LIMIT 1',
+      [req.user.id]
+    );
+    if (!users.length) return res.status(404).json({ message: 'Usuario no encontrado' });
+    const question = users[0].security_question;
+    return res.json({
+      configured: validateSecurityQuestion(question),
+      question: validateSecurityQuestion(question) ? question : null,
+      questions: Object.entries(SECURITY_QUESTIONS).map(([value, label]) => ({ value, label })),
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.put('/profile/security', ensureAuthenticated, async (req, res, next) => {
+  try {
+    const currentPassword = String(req.body?.current_password || req.body?.currentPassword || '');
+    const securityQuestion = String(req.body?.security_question || '').trim();
+    const securityAnswer = String(req.body?.security_answer || '');
+    if (!validateSecurityQuestion(securityQuestion) || !validateSecurityAnswer(securityAnswer)) {
+      return res.status(400).json({ message: 'Selecciona una pregunta y escribe una respuesta de al menos 3 caracteres' });
+    }
+
+    const [users] = await pool.query('SELECT id, password_hash FROM users WHERE id = ? LIMIT 1', [req.user.id]);
+    const user = users[0];
+    if (!user) return res.status(404).json({ message: 'Usuario no encontrado' });
+    if (user.password_hash && !verifyPassword(currentPassword, user.password_hash)) {
+      return res.status(401).json({ message: 'La contrasena actual no es correcta' });
+    }
+
+    await pool.query(
+      `UPDATE users
+       SET security_question = ?, security_answer_hash = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+      [securityQuestion, hashSecurityAnswer(securityAnswer), req.user.id]
+    );
+    return res.json({ message: 'Pregunta de recuperación actualizada correctamente' });
+  } catch (error) {
+    return next(error);
+  }
+});
+
 router.get('/staff/user-options', requireOperationalStaff, async (req, res, next) => {
   try {
     const params = [];
@@ -531,6 +704,8 @@ router.post('/staff/volunteers', requireVolunteerManager, async (req, res, next)
     const phone = String(req.body?.phone || '').trim() || null;
     const status = req.body?.status || 'active';
     const password = String(req.body?.password || '');
+    const securityQuestion = String(req.body?.security_question || '').trim();
+    const securityAnswer = String(req.body?.security_answer || '');
     const onboarding = req.body?.onboarding || null;
     const requestedCountryId = req.body?.country_id || req.body?.countryId || null;
     const countryId = req.staffRole === 'coordinator' ? req.freshUser?.country_id : requestedCountryId;
@@ -540,6 +715,9 @@ router.post('/staff/volunteers', requireVolunteerManager, async (req, res, next)
     }
     if (!validatePassword(password)) {
       return res.status(400).json({ message: 'La contrasena debe tener al menos 8 caracteres' });
+    }
+    if (!validateSecurityQuestion(securityQuestion) || !validateSecurityAnswer(securityAnswer)) {
+      return res.status(400).json({ message: 'La pregunta y respuesta de recuperación son requeridas' });
     }
     if (!onboarding || typeof onboarding !== 'object' || Array.isArray(onboarding)) {
       return res.status(400).json({ message: 'La informacion inicial del voluntario es requerida' });
@@ -561,9 +739,11 @@ router.post('/staff/volunteers', requireVolunteerManager, async (req, res, next)
 
     const [result] = await pool.query(
       `INSERT INTO users
-       (google_id, email, first_name, last_name, phone, role_id, country_id, status, password_hash)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [`local:${email}`, email, firstName, lastName, phone, roleRows[0].id, countryId, status, hashPassword(password)]
+       (google_id, email, first_name, last_name, phone, role_id, country_id, status, password_hash,
+        security_question, security_answer_hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [`local:${email}`, email, firstName, lastName, phone, roleRows[0].id, countryId, status,
+        hashPassword(password), securityQuestion, hashSecurityAnswer(securityAnswer)]
     );
 
     await pool.query('INSERT IGNORE INTO volunteers (user_id, status) VALUES (?, ?)', [result.insertId, 'active']);
@@ -603,6 +783,8 @@ router.post('/admin/users', requireAdmin, async (req, res, next) => {
     const countryId = req.body?.country_id || req.body?.countryId || null;
     const status = req.body?.status || 'active';
     const password = String(req.body?.password || '');
+    const securityQuestion = String(req.body?.security_question || '').trim();
+    const securityAnswer = String(req.body?.security_answer || '');
     const onboarding = req.body?.onboarding || null;
 
     if (!email || !firstName || !lastName || !roleId) {
@@ -610,6 +792,9 @@ router.post('/admin/users', requireAdmin, async (req, res, next) => {
     }
     if (!validatePassword(password)) {
       return res.status(400).json({ message: 'La contrasena debe tener al menos 8 caracteres' });
+    }
+    if (!validateSecurityQuestion(securityQuestion) || !validateSecurityAnswer(securityAnswer)) {
+      return res.status(400).json({ message: 'La pregunta y respuesta de recuperación son requeridas' });
     }
 
     const [roleRows] = await pool.query('SELECT name FROM roles WHERE id = ? LIMIT 1', [roleId]);
@@ -628,9 +813,11 @@ router.post('/admin/users', requireAdmin, async (req, res, next) => {
 
     const [result] = await pool.query(
       `INSERT INTO users
-       (google_id, email, first_name, last_name, phone, role_id, country_id, status, password_hash)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [`local:${email}`, email, firstName, lastName, phone, roleId, countryId, status, hashPassword(password)]
+       (google_id, email, first_name, last_name, phone, role_id, country_id, status, password_hash,
+        security_question, security_answer_hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [`local:${email}`, email, firstName, lastName, phone, roleId, countryId, status,
+        hashPassword(password), securityQuestion, hashSecurityAnswer(securityAnswer)]
     );
 
     const created = await getUserById(result.insertId);
